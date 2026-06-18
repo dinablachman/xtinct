@@ -202,6 +202,12 @@
   align-items: center;
 }
 
+.tw-input-label {
+  font-size: 14px;
+  color: var(--tw-text-muted);
+  margin-bottom: -8px;
+}
+
 .tw-search-form-centered .tw-input {
   width: 100%;
   max-width: 300px;

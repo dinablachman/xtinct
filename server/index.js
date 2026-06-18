@@ -155,6 +155,9 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       // Additional selectors for different Twitter layouts
       text = $('.tweet-text').text() || $('.js-tweet-text').text() || $('[data-testid="tweetText"]').text();
     }
+    // Strip wrapping quotes now so downstream checks (e.g. leading @mention
+    // reply detection) see the real first character, not a curly quote.
+    text = stripSurroundingQuotes(text);
     
     // Try to find timestamp from tweet content first
     let timestamp = $('meta[property="article:published_time"]').attr('content') || '';
@@ -171,9 +174,10 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       timestamp = parseWaybackTimestamp(waybackTimestamp);
     }
 
-    // --- reply detection (classic server-rendered layout) ---
+    // --- reply detection ---
     let isReply = false;
     let replyingTo = '';
+    // 1) DOM signals (classic server-rendered layout), when present
     const inReplyId =
       permalinkTweet.attr('data-in-reply-to-status-id') ||
       permalinkTweet.attr('data-in-reply-to-status-id-str') || '';
@@ -182,6 +186,14 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     if (/replying to/i.test(replyCtx)) {
       isReply = true;
       replyingTo = replyCtx.replace(/replying to/i, '').replace(/\s+/g, ' ').trim();
+    }
+    // 2) Text heuristic: classic replies begin with one or more @mentions
+    //    (e.g. "@madwheelclair Science obviously..."). This is the most reliable
+    //    signal we have, since og:description rarely includes reply markup.
+    const leadingMentions = (text.match(/^(?:@\w{1,15}\s+)+/) || [''])[0].trim();
+    if (leadingMentions) {
+      isReply = true;
+      if (!replyingTo) replyingTo = leadingMentions;
     }
 
     // --- author display name ---
@@ -222,7 +234,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     
     if (text && timestamp) {
       return {
-        text: stripSurroundingQuotes(text),
+        text,
         timestamp,
         isReply,
         replyingTo,

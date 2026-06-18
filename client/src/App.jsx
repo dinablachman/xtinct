@@ -11,6 +11,12 @@ function formatDate(dateStr) {
   })
 }
 
+// Real Twitter hides the leading @mentions of a reply from the body and shows
+// them in the "Replying to" line instead.
+function stripLeadingMentions(text) {
+  return (text || '').replace(/^(?:@\w{1,15}\s+)+/, '').trim()
+}
+
 // Default avatar placeholder (used when the archive yields no profile image)
 function DefaultAvatar({ className }) {
   return (
@@ -145,7 +151,9 @@ function App() {
             Replying to <span>{tweet.replyingTo ? tweet.replyingTo : 'this thread'}</span>
           </div>
         )}
-        <div className="xt-tweet-text">{tweet.text}</div>
+        <div className="xt-tweet-text">
+          {tweet.isReply ? (stripLeadingMentions(tweet.text) || tweet.text) : tweet.text}
+        </div>
         {tweet.media && tweet.media.length > 0 && (
           <div className="xt-media">
             {tweet.media.map((m, idx) => (
@@ -164,8 +172,9 @@ function App() {
         <div className="tw-title-screen">
           <div className="tw-title-container">
             <h1 className="tw-title-large">xTinct</h1>
-            <p className="tw-subtitle">this tool surfaces already-archived tweets from the <a href="https://wayback.archive.org" target="_blank" rel="noopener noreferrer">Wayback Machine</a> in a readable timeline view for research and preservation.</p>
+            <p className="tw-subtitle">ever lost a fan account to twitter suspension? not to worry. this tool brings your account back to life using public data from the <a href="https://wayback.archive.org" target="_blank" rel="noopener noreferrer">Wayback Machine</a>.</p>
             <form onSubmit={handleSubmit} className="tw-search-form-centered">
+              <label className="tw-input-label">enter a past or present twitter username...</label>
               <input
                 className="tw-input"
                 type="text"
@@ -225,7 +234,7 @@ function App() {
                 <div className="xt-handle">@{cleanUsername}</div>
               </div>
 
-              <p className="xt-bio xt-placeholder-text">No bio recovered from the archive yet.</p>
+              <p className="xt-bio xt-placeholder-text">no bio recovered from the archive yet</p>
 
               <div className="xt-meta">
                 <span className="xt-meta-item">Location unknown</span>
