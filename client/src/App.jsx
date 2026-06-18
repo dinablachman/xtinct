@@ -86,16 +86,15 @@ function App() {
   const [streaming, setStreaming] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [hasMore, setHasMore] = useState(false)
+  // Highest page index loaded so far; the next infinite-scroll fetch is page+1.
+  const [page, setPage] = useState(0)
+  // Whether the bottom-of-list sentinel is in view (driven solely by the observer).
+  const [atListEnd, setAtListEnd] = useState(false)
   const [progress, setProgress] = useState({ loaded: 0, total: 0 })
   const [error, setError] = useState('')
   const [hasSearched, setHasSearched] = useState(false)
   const eventSourceRef = useRef(null)
   const sentinelRef = useRef(null)
-  // The page most recently loaded, and a guard so we never start two page
-  // loads at once. Refs (not state) so the IntersectionObserver always reads
-  // the latest value without needing to re-subscribe.
-  const pageRef = useRef(0)
-  const loadingRef = useRef(false)
   // Incoming tweets are buffered and flushed in chunks (rather than one state
   // update per tweet) so the timeline grows smoothly instead of thrashing.
   const tweetBufferRef = useRef([])
@@ -103,6 +102,7 @@ function App() {
 
   const cleanUsername = username.replace(/^@/, '')
   const displayName = profile?.displayName || loadedUsername || 'Unknown'
+  const isLoading = streaming || loadingMore
 
   const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
   const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
@@ -147,7 +147,6 @@ function App() {
       eventSourceRef.current.close()
     }
 
-    loadingRef.current = true
     if (append) {
       setLoadingMore(true)
     } else {
@@ -166,7 +165,6 @@ function App() {
           clearTimeout(flushTimerRef.current)
         }
         flushTweetBuffer()
-        loadingRef.current = false
         setStreaming(false)
         setLoading(false)
         setLoadingMore(false)
@@ -196,7 +194,7 @@ function App() {
             }
             break
           case 'complete':
-            pageRef.current = pageNum
+            setPage(pageNum)
             setHasMore(data.hasMore)
             finish()
             if (!append) {
@@ -222,7 +220,6 @@ function App() {
 
     } catch (err) {
       if (!append) setError('Failed to connect to server.')
-      loadingRef.current = false
       setStreaming(false)
       setLoading(false)
       setLoadingMore(false)
@@ -238,32 +235,40 @@ function App() {
     setActiveTab('posts')
     setProgress({ loaded: 0, total: 0 })
     setHasMore(false)
+    setAtListEnd(false)
+    setPage(0)
     setHasSearched(true)
     if (!cleanUsername.trim()) return
     setLoadedUsername(cleanUsername)
-    pageRef.current = 0
     loadPage(cleanUsername, 0, false)
   }
 
-  // Infinite scroll: when the sentinel near the bottom of the list scrolls into
-  // view, load the next page. Refs hold the live page/loading state so the
-  // observer doesn't need to be torn down and rebuilt on every tweet.
+  // The observer's only responsibility: report whether the bottom-of-list
+  // sentinel is in view. Re-attaches when the sentinel mounts/unmounts (i.e.
+  // when `hasMore` toggles).
   useEffect(() => {
     const sentinel = sentinelRef.current
-    if (!sentinel) return
-    const observer = new IntersectionObserver((entries) => {
-      if (
-        entries[0].isIntersecting &&
-        hasMore &&
-        !loadingRef.current &&
-        loadedUsername
-      ) {
-        loadPage(loadedUsername, pageRef.current + 1, true)
-      }
-    }, { rootMargin: '600px' })
+    if (!sentinel) {
+      setAtListEnd(false)
+      return
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setAtListEnd(entry.isIntersecting),
+      { rootMargin: '600px' }
+    )
     observer.observe(sentinel)
     return () => observer.disconnect()
-  }, [hasMore, loadedUsername])
+  }, [hasMore])
+
+  // The load decision: fetch the next page whenever we're idle, there's more to
+  // fetch, and the sentinel is in view. Because this re-runs when loading
+  // finishes (`isLoading` flips), a short page that leaves the sentinel visible
+  // keeps filling — no timers or manual measurement needed.
+  useEffect(() => {
+    if (atListEnd && hasMore && !isLoading && loadedUsername) {
+      loadPage(loadedUsername, page + 1, true)
+    }
+  }, [atListEnd, hasMore, isLoading, loadedUsername, page])
 
   const handleTitleClick = () => {
     setHasSearched(false)
@@ -276,8 +281,8 @@ function App() {
     setError('')
     setProgress({ loaded: 0, total: 0 })
     setHasMore(false)
-    pageRef.current = 0
-    loadingRef.current = false
+    setAtListEnd(false)
+    setPage(0)
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
     }

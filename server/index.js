@@ -81,42 +81,81 @@ function parseWaybackTimestamp(waybackTs) {
   return `${year}-${month}-${day}T${hour}:${minute}:${second}Z`;
 }
 
-// Helper: fetch CDX data with retries
-async function fetchCDXData(username, retries = 3) {
-  // NOTE: we deliberately do NOT use `collapse=urlkey` here. It makes Wayback
-  // group/scan the whole result set server-side, which routinely exceeds our
-  // 15s timeout. Deduplication is instead done in `dedupeCaptures` on the full
-  // result set before slicing, so the source query stays fast. `fl` trims the
-  // payload to the two fields we actually use.
-  const cdxUrls = [
-    `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}/status/*&output=json&filter=statuscode:200&fl=original,timestamp`,
-    `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}/status/*&output=json&filter=statuscode:200`,
-    `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}/status/*&output=json&filter=statuscode:200&limit=1000`,
-    `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}/status/*&output=json&filter=statuscode:200&limit=500`
-  ];
+// Helper: fetch a single CDX URL. Rejects on empty/garbage payloads so that a
+// fast-but-empty response can't "win" the Promise.any race below over a slower
+// response that actually has captures.
+async function fetchCDXUrl(cdxUrl, signal) {
+  const { data } = await axios.get(cdxUrl, {
+    timeout: 15000, // ceiling, not a floor: the winner usually returns in ~2s
+    signal,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WaybackBot/1.0)' },
+  });
+  if (!Array.isArray(data) || data.length <= 1) {
+    throw new Error('empty CDX result');
+  }
+  return data;
+}
+
+// Race a group of CDX URLs: the first VALID response wins and the slower
+// siblings are aborted immediately, so a single slow/stalled variant can't gate
+// the whole load. Only fires a couple of requests to the lightweight index
+// endpoint, and cancels the loser — so this stays well clear of the snapshot
+// concurrency that has previously gotten us rate-limited.
+async function raceCDXUrls(cdxUrls) {
+  const controllers = cdxUrls.map(() => new AbortController());
+  const requests = cdxUrls.map((url, i) => fetchCDXUrl(url, controllers[i].signal));
+  try {
+    return await Promise.any(requests);
+  } finally {
+    // Cancel any still-in-flight siblings (no-op once they've settled) and
+    // attach a no-op catch so the aborted losers don't surface as unhandled
+    // rejections.
+    controllers.forEach(c => c.abort());
+    requests.forEach(p => p.catch(() => {}));
+  }
+}
+
+// Promise.any throws an AggregateError bundling every variant's failure; flatten
+// it to a readable one-liner for logs.
+function cdxErrorSummary(err) {
+  if (err && Array.isArray(err.errors)) {
+    return err.errors.map(e => e.message).join('; ');
+  }
+  return err.message;
+}
+
+// Helper: fetch CDX data with retries.
+//
+// NOTE: we deliberately do NOT use `collapse=urlkey` here. It makes Wayback
+// group/scan the whole result set server-side, which routinely exceeds our
+// timeout. Deduplication is instead done in `dedupeCaptures`.
+//
+// The plain query is the fast, complete one (~2s) and the `fl=original,timestamp`
+// variant is actually SLOWER server-side despite a smaller payload, so instead
+// of trusting one order we race them and take whichever responds first. The
+// `limit=` variants are a last-resort fallback only: `limit` returns OLDEST-first
+// up to the cap, so they can truncate prolific accounts and must not win normally.
+async function fetchCDXData(username, retries = 2) {
+  const base = `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}/status/*&output=json&filter=statuscode:200`;
+  const primary = [base, `${base}&fl=original,timestamp`];
+  const fallback = [`${base}&limit=1000`, `${base}&limit=500`];
 
   for (let attempt = 0; attempt < retries; attempt++) {
-    for (const cdxUrl of cdxUrls) {
+    for (const group of [primary, fallback]) {
       try {
-        console.log(`Attempt ${attempt + 1}: Fetching CDX data from ${cdxUrl}...`);
-        const { data } = await axios.get(cdxUrl, { 
-          timeout: 15000, // 15 second timeout per attempt
-          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WaybackBot/1.0)' }
-        });
-        
-        if (Array.isArray(data) && data.length > 1) {
-          console.log(`Successfully fetched ${data.length - 1} captures from CDX API`);
-          return data;
-        }
+        const data = await raceCDXUrls(group);
+        console.log(`Successfully fetched ${data.length - 1} captures from CDX API`);
+        return data;
       } catch (err) {
-        console.log(`CDX attempt ${attempt + 1} failed: ${err.message}`);
-        if (attempt === retries - 1) throw err;
-        // Wait before retry
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        console.log(`CDX attempt ${attempt + 1} round failed: ${cdxErrorSummary(err)}`);
       }
     }
+    // Back off before the next full retry (skip after the last attempt).
+    if (attempt < retries - 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
   }
-  
+
   throw new Error('All CDX API attempts failed');
 }
 
