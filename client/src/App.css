@@ -411,34 +411,37 @@
   background: var(--tw-blue);
 }
 
-.xt-tab-count {
-  font-weight: 600;
-  font-size: 13px;
-  color: var(--tw-text-muted);
-}
-
 /* Loading */
-.xt-loading {
+/* "Loading more" row at the bottom of the timeline */
+.xt-loading-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   padding: 16px 18px;
-  text-align: center;
   color: var(--tw-text-muted);
   font-size: 14px;
+  border-bottom: 1px solid var(--tw-border);
 }
 
-.xt-progress-bar {
-  width: 100%;
-  height: 4px;
-  background: #e1e8ed;
-  border-radius: 3px;
-  overflow: hidden;
-  margin-bottom: 8px;
+.xt-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid #e1e8ed;
+  border-top-color: var(--tw-blue);
+  border-radius: 50%;
+  animation: xt-spin 0.7s linear infinite;
+  flex: 0 0 auto;
 }
 
-.xt-progress-fill {
-  height: 100%;
-  background: var(--tw-blue);
-  border-radius: 3px;
-  transition: width 0.3s ease;
+@keyframes xt-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Invisible trigger for infinite scroll; given height so it can intersect. */
+.xt-sentinel {
+  height: 1px;
+  list-style: none;
 }
 
 /* Timeline */

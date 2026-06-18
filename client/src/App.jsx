@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useMemo, useEffect, memo } from 'react'
 import './App.css'
 
 function formatDate(dateStr) {
@@ -28,118 +28,21 @@ function DefaultAvatar({ className }) {
   )
 }
 
-function App() {
-  const [username, setUsername] = useState('')
-  // The username of the profile currently loaded/displayed. Only updates on
-  // submit, so typing a new query doesn't mutate the already-loaded profile.
-  const [loadedUsername, setLoadedUsername] = useState('')
-  const [tweets, setTweets] = useState([])
-  const [profile, setProfile] = useState(null)
-  const [activeTab, setActiveTab] = useState('posts')
-  const [loading, setLoading] = useState(false)
-  const [streaming, setStreaming] = useState(false)
-  const [progress, setProgress] = useState({ loaded: 0, total: 0 })
-  const [error, setError] = useState('')
-  const [hasSearched, setHasSearched] = useState(false)
-  const eventSourceRef = useRef(null)
+// Stable identity for a tweet, used both for dedup and as the React key. Using
+// content (not array index) keeps keys stable across re-sorts, so React moves
+// existing rows instead of remounting them — which is what kills the jank.
+function tweetKey(t) {
+  return `${t.timestamp}|${t.text}`
+}
 
-  const cleanUsername = username.replace(/^@/, '')
-  const displayName = profile?.displayName || loadedUsername || 'Unknown'
-
-  const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
-  const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
-  const shown = activeTab === 'posts' ? posts : replies
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    setError('')
-    setTweets([])
-    setProfile(null)
-    setActiveTab('posts')
-    setProgress({ loaded: 0, total: 0 })
-    setHasSearched(true)
-    if (!cleanUsername.trim()) return
-    setLoadedUsername(cleanUsername)
-
-    // Close any existing connection
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-    }
-
-    setStreaming(true)
-    setLoading(true)
-
-    try {
-      const eventSource = new EventSource(`/api/tweets/stream/${cleanUsername}`)
-      eventSourceRef.current = eventSource
-
-      eventSource.onmessage = (event) => {
-        const { type, data } = JSON.parse(event.data)
-
-        switch (type) {
-          case 'progress':
-            setProgress(data)
-            break
-          case 'profile':
-            setProfile(data)
-            break
-          case 'tweet':
-            setTweets(prev => {
-              const newTweets = [...prev, data]
-              return newTweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-            })
-            break
-          case 'complete':
-            setStreaming(false)
-            setLoading(false)
-            eventSource.close()
-            setTweets(currentTweets => {
-              if (currentTweets.length === 0) setError('No archived tweets found.')
-              return currentTweets
-            })
-            break
-          case 'error':
-            setError(data.message || 'Failed to fetch tweets.')
-            setStreaming(false)
-            setLoading(false)
-            eventSource.close()
-            break
-        }
-      }
-
-      eventSource.onerror = () => {
-        setError('Connection lost. Please try again.')
-        setStreaming(false)
-        setLoading(false)
-        eventSource.close()
-      }
-
-    } catch (err) {
-      setError('Failed to connect to server.')
-      setStreaming(false)
-      setLoading(false)
-    }
-  }
-
-  const handleTitleClick = () => {
-    setHasSearched(false)
-    setUsername('')
-    setLoadedUsername('')
-    setTweets([])
-    setProfile(null)
-    setActiveTab('posts')
-    setError('')
-    setProgress({ loaded: 0, total: 0 })
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close()
-    }
-  }
-
-  const renderTweet = (tweet, i) => (
-    <li key={`${tweet.timestamp}-${i}`} className="xt-tweet">
+// Memoized row so already-rendered tweets don't re-render as new ones stream in.
+const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAvatarUrl }) {
+  const avatarUrl = tweet.avatarUrl || profileAvatarUrl
+  return (
+    <li className="xt-tweet">
       <div className="xt-tweet-avatar">
-        {tweet.avatarUrl || profile?.avatarUrl ? (
-          <img src={tweet.avatarUrl || profile.avatarUrl} alt="" loading="lazy" />
+        {avatarUrl ? (
+          <img src={avatarUrl} alt="" loading="lazy" />
         ) : (
           <DefaultAvatar className="xt-avatar-placeholder" />
         )}
@@ -147,7 +50,7 @@ function App() {
       <div className="xt-tweet-main">
         <div className="xt-tweet-head">
           <span className="xt-tweet-name">{displayName}</span>
-          <span className="xt-tweet-handle">@{loadedUsername}</span>
+          <span className="xt-tweet-handle">@{handle}</span>
           <span className="xt-dot">·</span>
           <span className="xt-tweet-time">{formatDate(tweet.timestamp)}</span>
         </div>
@@ -169,6 +72,218 @@ function App() {
       </div>
     </li>
   )
+})
+
+function App() {
+  const [username, setUsername] = useState('')
+  // The username of the profile currently loaded/displayed. Only updates on
+  // submit, so typing a new query doesn't mutate the already-loaded profile.
+  const [loadedUsername, setLoadedUsername] = useState('')
+  const [tweets, setTweets] = useState([])
+  const [profile, setProfile] = useState(null)
+  const [activeTab, setActiveTab] = useState('posts')
+  const [loading, setLoading] = useState(false)
+  const [streaming, setStreaming] = useState(false)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [hasMore, setHasMore] = useState(false)
+  const [progress, setProgress] = useState({ loaded: 0, total: 0 })
+  const [error, setError] = useState('')
+  const [hasSearched, setHasSearched] = useState(false)
+  const eventSourceRef = useRef(null)
+  const sentinelRef = useRef(null)
+  // The page most recently loaded, and a guard so we never start two page
+  // loads at once. Refs (not state) so the IntersectionObserver always reads
+  // the latest value without needing to re-subscribe.
+  const pageRef = useRef(0)
+  const loadingRef = useRef(false)
+  // Incoming tweets are buffered and flushed in chunks (rather than one state
+  // update per tweet) so the timeline grows smoothly instead of thrashing.
+  const tweetBufferRef = useRef([])
+  const flushTimerRef = useRef(null)
+
+  const cleanUsername = username.replace(/^@/, '')
+  const displayName = profile?.displayName || loadedUsername || 'Unknown'
+
+  const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
+  const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
+  const shown = activeTab === 'posts' ? posts : replies
+
+  // Flush all buffered tweets into the timeline in one batched update.
+  const flushTweetBuffer = () => {
+    flushTimerRef.current = null
+    const buffered = tweetBufferRef.current
+    if (buffered.length === 0) return
+    tweetBufferRef.current = []
+    setTweets(prev => {
+      const seen = new Set(prev.map(tweetKey))
+      const additions = []
+      for (const t of buffered) {
+        const k = tweetKey(t)
+        if (!seen.has(k)) {
+          seen.add(k)
+          additions.push(t)
+        }
+      }
+      if (additions.length === 0) return prev
+      const next = prev.concat(additions)
+      next.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      return next
+    })
+  }
+
+  const clearTweetBuffer = () => {
+    tweetBufferRef.current = []
+    if (flushTimerRef.current) {
+      clearTimeout(flushTimerRef.current)
+      flushTimerRef.current = null
+    }
+  }
+
+  // Loads one page of tweets over SSE. `append` distinguishes the initial
+  // search (replace the timeline) from infinite-scroll (add to it).
+  const loadPage = (user, pageNum, append) => {
+    if (!user) return
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+    }
+
+    loadingRef.current = true
+    if (append) {
+      setLoadingMore(true)
+    } else {
+      setStreaming(true)
+      setLoading(true)
+    }
+    setProgress({ loaded: 0, total: 0 })
+
+    try {
+      const eventSource = new EventSource(`/api/tweets/stream/${user}?page=${pageNum}`)
+      eventSourceRef.current = eventSource
+
+      const finish = () => {
+        // Flush any tweets still sitting in the buffer when the page completes.
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current)
+        }
+        flushTweetBuffer()
+        loadingRef.current = false
+        setStreaming(false)
+        setLoading(false)
+        setLoadingMore(false)
+        eventSource.close()
+      }
+
+      eventSource.onmessage = (event) => {
+        const { type, data } = JSON.parse(event.data)
+
+        switch (type) {
+          case 'meta':
+            setHasMore(data.hasMore)
+            break
+          case 'progress':
+            setProgress(data)
+            break
+          case 'profile':
+            // Keep the first profile we recover; later pages resend the same.
+            setProfile(prev => prev || data)
+            break
+          case 'tweet':
+            // Buffer and flush in ~100ms chunks so the list grows smoothly
+            // instead of re-rendering on every single tweet.
+            tweetBufferRef.current.push(data)
+            if (!flushTimerRef.current) {
+              flushTimerRef.current = setTimeout(flushTweetBuffer, 100)
+            }
+            break
+          case 'complete':
+            pageRef.current = pageNum
+            setHasMore(data.hasMore)
+            finish()
+            if (!append) {
+              setTweets(currentTweets => {
+                if (currentTweets.length === 0) setError('No archived tweets found.')
+                return currentTweets
+              })
+            }
+            break
+          case 'error':
+            setError(data.message || 'Failed to fetch tweets.')
+            finish()
+            break
+        }
+      }
+
+      eventSource.onerror = () => {
+        // Only surface a connection error on the initial load; a dropped
+        // "load more" shouldn't blow away an already-populated timeline.
+        if (!append) setError('Connection lost. Please try again.')
+        finish()
+      }
+
+    } catch (err) {
+      if (!append) setError('Failed to connect to server.')
+      loadingRef.current = false
+      setStreaming(false)
+      setLoading(false)
+      setLoadingMore(false)
+    }
+  }
+
+  const handleSubmit = async (e) => {
+    e.preventDefault()
+    setError('')
+    clearTweetBuffer()
+    setTweets([])
+    setProfile(null)
+    setActiveTab('posts')
+    setProgress({ loaded: 0, total: 0 })
+    setHasMore(false)
+    setHasSearched(true)
+    if (!cleanUsername.trim()) return
+    setLoadedUsername(cleanUsername)
+    pageRef.current = 0
+    loadPage(cleanUsername, 0, false)
+  }
+
+  // Infinite scroll: when the sentinel near the bottom of the list scrolls into
+  // view, load the next page. Refs hold the live page/loading state so the
+  // observer doesn't need to be torn down and rebuilt on every tweet.
+  useEffect(() => {
+    const sentinel = sentinelRef.current
+    if (!sentinel) return
+    const observer = new IntersectionObserver((entries) => {
+      if (
+        entries[0].isIntersecting &&
+        hasMore &&
+        !loadingRef.current &&
+        loadedUsername
+      ) {
+        loadPage(loadedUsername, pageRef.current + 1, true)
+      }
+    }, { rootMargin: '600px' })
+    observer.observe(sentinel)
+    return () => observer.disconnect()
+  }, [hasMore, loadedUsername])
+
+  const handleTitleClick = () => {
+    setHasSearched(false)
+    setUsername('')
+    setLoadedUsername('')
+    clearTweetBuffer()
+    setTweets([])
+    setProfile(null)
+    setActiveTab('posts')
+    setError('')
+    setProgress({ loaded: 0, total: 0 })
+    setHasMore(false)
+    pageRef.current = 0
+    loadingRef.current = false
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close()
+    }
+  }
+
+  const profileAvatarUrl = profile?.avatarUrl
 
   return (
     <div>
@@ -258,35 +373,45 @@ function App() {
                 className={`xt-tab ${activeTab === 'posts' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('posts')}
               >
-                Posts <span className="xt-tab-count">{posts.length}</span>
+                Posts
               </button>
               <button
                 className={`xt-tab ${activeTab === 'replies' ? 'is-active' : ''}`}
                 onClick={() => setActiveTab('replies')}
               >
-                Replies <span className="xt-tab-count">{replies.length}</span>
+                Replies
               </button>
             </div>
 
-            {/* Loading progress */}
-            {streaming && progress.total > 0 && (
-              <div className="xt-loading">
-                <div className="xt-progress-bar">
-                  <div
-                    className="xt-progress-fill"
-                    style={{ width: `${(progress.loaded / progress.total) * 100}%` }}
-                  />
-                </div>
-                <span>Loading archived tweets… {progress.loaded}/{progress.total}</span>
-              </div>
-            )}
-
-            {/* Timeline */}
+            {/* Timeline — tweets stream in newest-first, so the top fills first
+                and a "loading more" row sits at the bottom as older ones arrive. */}
             <ul className="xt-tweet-list">
-              {shown.map(renderTweet)}
-              {!streaming && shown.length === 0 && (
+              {shown.map(tweet => (
+                <TweetRow
+                  key={tweetKey(tweet)}
+                  tweet={tweet}
+                  displayName={displayName}
+                  handle={loadedUsername}
+                  profileAvatarUrl={profileAvatarUrl}
+                />
+              ))}
+              {(streaming || loadingMore) && (
+                <li className="xt-loading-row">
+                  <span className="xt-spinner" aria-hidden="true" />
+                  <span>
+                    {streaming && progress.total === 0
+                      ? 'Searching the archive…'
+                      : loadingMore
+                        ? 'Loading more tweets…'
+                        : `Loading archived tweets… ${progress.loaded}/${progress.total}`}
+                  </span>
+                </li>
+              )}
+              {!streaming && !loadingMore && shown.length === 0 && (
                 <li className="xt-empty">No {activeTab} found in the archive.</li>
               )}
+              {/* Sentinel: when this scrolls into view, the next page loads. */}
+              {hasMore && <li ref={sentinelRef} className="xt-sentinel" aria-hidden="true" />}
             </ul>
           </div>
         </div>
