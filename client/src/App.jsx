@@ -1,5 +1,4 @@
-import { useState, useRef } from 'react'
-import axios from 'axios'
+import { useState, useRef, useMemo } from 'react'
 import './App.css'
 
 function formatDate(dateStr) {
@@ -12,9 +11,22 @@ function formatDate(dateStr) {
   })
 }
 
+// Default avatar placeholder (used when the archive yields no profile image)
+function DefaultAvatar({ className }) {
+  return (
+    <div className={className}>
+      <svg viewBox="0 0 24 24" width="58%" height="58%" fill="#ffffff" aria-hidden="true">
+        <path d="M12 11.8a4.2 4.2 0 1 0 0-8.4 4.2 4.2 0 0 0 0 8.4Zm0 1.8c-3.5 0-9 1.8-9 5.2v1.8h18v-1.8c0-3.4-5.5-5.2-9-5.2Z" />
+      </svg>
+    </div>
+  )
+}
+
 function App() {
   const [username, setUsername] = useState('')
   const [tweets, setTweets] = useState([])
+  const [profile, setProfile] = useState(null)
+  const [activeTab, setActiveTab] = useState('posts')
   const [loading, setLoading] = useState(false)
   const [streaming, setStreaming] = useState(false)
   const [progress, setProgress] = useState({ loaded: 0, total: 0 })
@@ -22,37 +34,48 @@ function App() {
   const [hasSearched, setHasSearched] = useState(false)
   const eventSourceRef = useRef(null)
 
+  const cleanUsername = username.replace(/^@/, '')
+  const displayName = profile?.displayName || cleanUsername || 'Unknown'
+
+  const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
+  const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
+  const shown = activeTab === 'posts' ? posts : replies
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
     setTweets([])
+    setProfile(null)
+    setActiveTab('posts')
     setProgress({ loaded: 0, total: 0 })
     setHasSearched(true)
-    if (!username.trim()) return
-    
+    if (!cleanUsername.trim()) return
+
     // Close any existing connection
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
     }
-    
+
     setStreaming(true)
     setLoading(true)
-    
+
     try {
-      const eventSource = new EventSource(`/api/tweets/stream/${username.replace(/^@/, '')}`)
+      const eventSource = new EventSource(`/api/tweets/stream/${cleanUsername}`)
       eventSourceRef.current = eventSource
-      
+
       eventSource.onmessage = (event) => {
         const { type, data } = JSON.parse(event.data)
-        
+
         switch (type) {
           case 'progress':
             setProgress(data)
             break
+          case 'profile':
+            setProfile(data)
+            break
           case 'tweet':
             setTweets(prev => {
               const newTweets = [...prev, data]
-              // Sort by timestamp (newest first) as we add tweets
               return newTweets.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
             })
             break
@@ -60,7 +83,6 @@ function App() {
             setStreaming(false)
             setLoading(false)
             eventSource.close()
-            // Check if we actually have tweets by looking at the current state
             setTweets(currentTweets => {
               if (currentTweets.length === 0) setError('No archived tweets found.')
               return currentTweets
@@ -74,14 +96,14 @@ function App() {
             break
         }
       }
-      
+
       eventSource.onerror = () => {
         setError('Connection lost. Please try again.')
         setStreaming(false)
         setLoading(false)
         eventSource.close()
       }
-      
+
     } catch (err) {
       setError('Failed to connect to server.')
       setStreaming(false)
@@ -89,18 +111,51 @@ function App() {
     }
   }
 
-  const handleDisplay = username.trim() ? '@' + username.replace(/^@/, '') : ''
-
   const handleTitleClick = () => {
     setHasSearched(false)
     setUsername('')
     setTweets([])
+    setProfile(null)
+    setActiveTab('posts')
     setError('')
     setProgress({ loaded: 0, total: 0 })
     if (eventSourceRef.current) {
       eventSourceRef.current.close()
     }
   }
+
+  const renderTweet = (tweet, i) => (
+    <li key={`${tweet.timestamp}-${i}`} className="xt-tweet">
+      <div className="xt-tweet-avatar">
+        {tweet.avatarUrl || profile?.avatarUrl ? (
+          <img src={tweet.avatarUrl || profile.avatarUrl} alt="" loading="lazy" />
+        ) : (
+          <DefaultAvatar className="xt-avatar-placeholder" />
+        )}
+      </div>
+      <div className="xt-tweet-main">
+        <div className="xt-tweet-head">
+          <span className="xt-tweet-name">{displayName}</span>
+          <span className="xt-tweet-handle">@{cleanUsername}</span>
+          <span className="xt-dot">·</span>
+          <span className="xt-tweet-time">{formatDate(tweet.timestamp)}</span>
+        </div>
+        {tweet.isReply && (
+          <div className="xt-replying">
+            Replying to <span>{tweet.replyingTo ? tweet.replyingTo : 'this thread'}</span>
+          </div>
+        )}
+        <div className="xt-tweet-text">{tweet.text}</div>
+        {tweet.media && tweet.media.length > 0 && (
+          <div className="xt-media">
+            {tweet.media.map((m, idx) => (
+              <img key={idx} src={m} alt="" loading="lazy" />
+            ))}
+          </div>
+        )}
+      </div>
+    </li>
+  )
 
   return (
     <div>
@@ -115,7 +170,7 @@ function App() {
                 className="tw-input"
                 type="text"
                 placeholder="@username"
-                value={`@${username}`}
+                value={`@${cleanUsername}`}
                 onChange={e => setUsername(e.target.value.replace(/^@/, ''))}
                 spellCheck="false"
               />
@@ -127,22 +182,18 @@ function App() {
           </div>
         </div>
       ) : (
-        // Results screen - current layout
-        <>
-          <header className="tw-topbar">
-            <div className="tw-container">
-              <div className="tw-brand" onClick={handleTitleClick} style={{ cursor: 'pointer' }}>xTinct</div>
-            </div>
-          </header>
-
-          <main className="tw-container">
-            <section className="tw-search">
-              <form onSubmit={handleSubmit} className="tw-search-form">
+        // Results screen - Twitter-style profile layout
+        <div className="xt-app">
+          {/* Search bar replaces the Figma status bar */}
+          <header className="xt-searchbar">
+            <div className="xt-searchbar-inner">
+              <div className="xt-brand" onClick={handleTitleClick}>xTinct</div>
+              <form onSubmit={handleSubmit} className="xt-search-form">
                 <input
                   className="tw-input"
                   type="text"
                   placeholder="@username"
-                  value={`@${username}`}
+                  value={`@${cleanUsername}`}
                   onChange={e => setUsername(e.target.value.replace(/^@/, ''))}
                   spellCheck="false"
                 />
@@ -150,42 +201,81 @@ function App() {
                   {loading ? 'Searching...' : 'Search'}
                 </button>
               </form>
-              {error && <div className="tw-error">{error}</div>}
-            </section>
-
-            {/* Progress indicator */}
-            {streaming && progress.total > 0 && (
-              <div className="tw-progress-container">
-                <div className="tw-progress-bar">
-                  <div 
-                    className="tw-progress-fill" 
-                    style={{ width: `${(progress.loaded / progress.total) * 100}%` }}
-                  ></div>
-                </div>
-            <div className="tw-progress-text">
-              Loading tweets...
             </div>
+          </header>
+
+          <div className="xt-profile">
+            {error && <div className="tw-error" style={{ padding: '12px 18px', margin: 0 }}>{error}</div>}
+
+            {/* Banner (placeholder) */}
+            <div className="xt-banner" aria-hidden="true" />
+
+            {/* Profile header card */}
+            <div className="xt-header">
+              <div className="xt-avatar-wrap">
+                {profile?.avatarUrl ? (
+                  <img className="xt-avatar-img" src={profile.avatarUrl} alt={displayName} />
+                ) : (
+                  <DefaultAvatar className="xt-avatar-img xt-avatar-placeholder" />
+                )}
+              </div>
+
+              <div className="xt-identity">
+                <div className="xt-display-name">{displayName}</div>
+                <div className="xt-handle">@{cleanUsername}</div>
+              </div>
+
+              <p className="xt-bio xt-placeholder-text">No bio recovered from the archive yet.</p>
+
+              <div className="xt-meta">
+                <span className="xt-meta-item">Location unknown</span>
+                <span className="xt-meta-item">Joined &mdash;</span>
+              </div>
+
+              <div className="xt-stats">
+                <span><strong>&mdash;</strong> Following</span>
+                <span><strong>&mdash;</strong> Followers</span>
+              </div>
+            </div>
+
+            {/* Tabs */}
+            <div className="xt-tabs">
+              <button
+                className={`xt-tab ${activeTab === 'posts' ? 'is-active' : ''}`}
+                onClick={() => setActiveTab('posts')}
+              >
+                Posts <span className="xt-tab-count">{posts.length}</span>
+              </button>
+              <button
+                className={`xt-tab ${activeTab === 'replies' ? 'is-active' : ''}`}
+                onClick={() => setActiveTab('replies')}
+              >
+                Replies <span className="xt-tab-count">{replies.length}</span>
+              </button>
+            </div>
+
+            {/* Loading progress */}
+            {streaming && progress.total > 0 && (
+              <div className="xt-loading">
+                <div className="xt-progress-bar">
+                  <div
+                    className="xt-progress-fill"
+                    style={{ width: `${(progress.loaded / progress.total) * 100}%` }}
+                  />
+                </div>
+                <span>Loading archived tweets… {progress.loaded}/{progress.total}</span>
               </div>
             )}
 
-
-            <ul className="tw-tweet-list">
-              {tweets.map((tweet, i) => (
-                <li key={`${tweet.timestamp}-${i}`} className="tw-tweet">
-                  <div className="tw-avatar" aria-hidden="true"></div>
-                  <div className="tw-tweet-body">
-                    <div className="tw-tweet-header">
-                      {handleDisplay && <span className="tw-name">{handleDisplay}</span>}
-                      {handleDisplay && <span className="tw-dot">·</span>}
-                      <time className="tw-time">{formatDate(tweet.timestamp)}</time>
-                    </div>
-                    <div className="tw-text">{tweet.text}</div>
-                  </div>
-                </li>
-              ))}
+            {/* Timeline */}
+            <ul className="xt-tweet-list">
+              {shown.map(renderTweet)}
+              {!streaming && shown.length === 0 && (
+                <li className="xt-empty">No {activeTab} found in the archive.</li>
+              )}
             </ul>
-          </main>
-        </>
+          </div>
+        </div>
       )}
     </div>
   )

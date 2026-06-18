@@ -97,8 +97,30 @@ async function fetchCDXData(username, retries = 3) {
   throw new Error('All CDX API attempts failed');
 }
 
-// Helper: fetch and extract tweet text/timestamp from a Wayback snapshot
+// Helper: build a Wayback URL that serves the raw archived image bytes.
+// The `im_` modifier returns the original file (no toolbar), and Wayback
+// redirects to the nearest capture, so it works even when the live
+// pbs.twimg.com asset is gone (suspended/deleted accounts).
+function archiveImageUrl(originalUrl, waybackTimestamp) {
+  if (!originalUrl) return '';
+  const https = originalUrl.replace(/^http:/, 'https:');
+  return `https://web.archive.org/web/${waybackTimestamp}im_/${https}`;
+}
+
+// Helper: upgrade a Twitter profile image to a larger variant for crisp avatars
+function upgradeAvatarSize(url) {
+  return (url || '').replace(/_(normal|bigger|mini|reasonably_small)\./, '_400x400.');
+}
+
+// Helper: fetch and extract tweet content + author identity from a Wayback snapshot
 async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
+  const empty = {
+    isReply: false,
+    replyingTo: '',
+    displayName: '',
+    avatarUrl: '',
+    media: [],
+  };
   try {
     const { data, headers } = await axios.get(snapshotUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
@@ -110,6 +132,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       const json = typeof data === 'string' ? JSON.parse(data) : data;
       if (json && json.data && json.data.text && json.data.created_at) {
         return {
+          ...empty,
           text: stripSurroundingQuotes(json.data.text),
           timestamp: json.data.created_at,
         };
@@ -118,8 +141,12 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     
     // Fallback: HTML parsing
     const $ = cheerio.load(data);
+
+    // The main tweet on a permalink page (scope reply/avatar lookups to it so
+    // we don't pick up conversation replies further down the page).
+    const permalinkTweet = $('.permalink-tweet, .tweet.permalink-tweet, [data-permalink-path]').first();
     
-    // Try to find tweet text (Twitter classic layout)
+    // --- tweet text ---
     let text = $('meta[property="og:description"]').attr('content') || '';
     if (!text) {
       text = $('div[data-testid="tweetText"]').text();
@@ -143,9 +170,66 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     if (!timestamp && waybackTimestamp) {
       timestamp = parseWaybackTimestamp(waybackTimestamp);
     }
+
+    // --- reply detection (classic server-rendered layout) ---
+    let isReply = false;
+    let replyingTo = '';
+    const inReplyId =
+      permalinkTweet.attr('data-in-reply-to-status-id') ||
+      permalinkTweet.attr('data-in-reply-to-status-id-str') || '';
+    const replyCtx = permalinkTweet.find('.ReplyingToContextBelowAuthor').first().text().trim();
+    if (inReplyId) isReply = true;
+    if (/replying to/i.test(replyCtx)) {
+      isReply = true;
+      replyingTo = replyCtx.replace(/replying to/i, '').replace(/\s+/g, ' ').trim();
+    }
+
+    // --- author display name ---
+    let displayName = '';
+    const ogTitle = $('meta[property="og:title"]').attr('content') || '';
+    const ogMatch = ogTitle.match(/^(.*?)\s+on (?:Twitter|X)\b/i);
+    if (ogMatch) displayName = ogMatch[1].trim();
+    if (!displayName) {
+      // classic title format: "Twitter / Jack Dorsey: ..."
+      const classicMatch = ($('title').first().text() || '').match(/^Twitter\s*\/\s*([^:]+)/i);
+      if (classicMatch) displayName = classicMatch[1].trim();
+    }
+
+    // --- author avatar ---
+    let avatarOriginal =
+      permalinkTweet.find('img.avatar, img.js-action-profile-avatar, .ProfileAvatar-image').first().attr('src') ||
+      $('.permalink-tweet img.avatar').first().attr('src') ||
+      $('.profile-pic img').first().attr('src') || '';
+    if (!avatarOriginal) {
+      // On a text-only tweet, og:image is the author's profile picture.
+      const ogImg = $('meta[property="og:image"]').attr('content') || '';
+      if (ogImg.includes('profile_images')) avatarOriginal = ogImg;
+    }
+    const avatarUrl = avatarOriginal
+      ? archiveImageUrl(upgradeAvatarSize(avatarOriginal), waybackTimestamp)
+      : '';
+
+    // --- in-tweet media (photos) ---
+    const media = [];
+    permalinkTweet
+      .find('.AdaptiveMedia-photoContainer img, .js-adaptive-photo img, .media-thumbnail img')
+      .each((i, el) => {
+        const src = $(el).attr('src') || $(el).attr('data-image-url') || '';
+        if (src && /twimg\.com\/media/.test(src)) {
+          media.push(archiveImageUrl(src, waybackTimestamp));
+        }
+      });
     
     if (text && timestamp) {
-      return { text: stripSurroundingQuotes(text), timestamp };
+      return {
+        text: stripSurroundingQuotes(text),
+        timestamp,
+        isReply,
+        replyingTo,
+        displayName,
+        avatarUrl,
+        media,
+      };
     }
   } catch (err) {
     // Skip failed requests silently
@@ -192,6 +276,9 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     
     // Send initial progress
     sendEvent('progress', { total: recentCaptures.length, loaded: 0 });
+
+    // Send identity (display name + avatar) once, as soon as we can recover it
+    let profileSent = false;
     
     // Process captures with concurrency control and streaming
     const tweetPromises = recentCaptures.map((cap, index) => {
@@ -199,10 +286,22 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
       return limit.run(async () => {
         const tweet = await extractTweetFromSnapshot(snapshotUrl, cap.timestamp);
         if (tweet && tweet.text && tweet.timestamp) {
+          if (!profileSent && (tweet.displayName || tweet.avatarUrl)) {
+            profileSent = true;
+            sendEvent('profile', {
+              handle: username,
+              displayName: tweet.displayName,
+              avatarUrl: tweet.avatarUrl,
+            });
+          }
           // Send tweet as it's processed
           sendEvent('tweet', {
             text: tweet.text,
             timestamp: tweet.timestamp,
+            isReply: tweet.isReply,
+            replyingTo: tweet.replyingTo,
+            avatarUrl: tweet.avatarUrl,
+            media: tweet.media,
           });
         }
         // Send progress update
