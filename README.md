@@ -1,10 +1,10 @@
-# ghostfeed
+# xTinct
 
 a tool to view archived tweets from suspended or deleted twitter accounts using the wayback machine.
 
 ## what is this?
 
-ghostfeed allows you to search for and view cached/captured tweets from twitter accounts that have been suspended, deleted, or otherwise made inaccessible. it works by querying the internet archive's wayback machine for historical snapshots of twitter profiles and extracting the tweet content from those archived pages.
+xTinct allows you to search for and view cached/captured tweets from twitter accounts that have been suspended, deleted, or otherwise made inaccessible. it works by querying the internet archive's wayback machine for historical snapshots of twitter profiles and extracting the tweet content from those archived pages.
 
 ## data sources
 
@@ -16,7 +16,7 @@ this application uses the following data sources:
 
 ## privacy & data handling
 
-- **no data storage**: ghostfeed does not store, cache, or persist any user data or tweet content
+- **no data storage**: this tool does not store, cache, or persist any user data or tweet content
 - **no user accounts**: the application does not require or collect any personal information
 - **public data only**: all data accessed is from publicly available web archives
 - **no tracking**: no analytics, cookies, or tracking mechanisms are implemented
@@ -33,8 +33,8 @@ this application uses the following data sources:
 
 1. **clone the repository**
    ```bash
-   git clone https://github.com/yourusername/ghostfeed.git
-   cd ghostfeed
+   git clone https://github.com/yourusername/xtinct.git
+   cd xtinct
    ```
 
 2. **install dependencies**

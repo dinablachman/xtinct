@@ -38,6 +38,20 @@ class ConcurrencyLimiter {
 
 const limit = new ConcurrencyLimiter(5);
 
+// Helper: strip surrounding quotes from text (e.g. from og:description)
+function stripSurroundingQuotes(text) {
+  const trimmed = (text || '').trim();
+  const quotePairs = [
+    ['"', '"'], ["'", "'"], ['\u201C', '\u201D'], ['\u2018', '\u2019'],
+  ];
+  for (const [open, close] of quotePairs) {
+    if (trimmed.length >= 2 && trimmed.startsWith(open) && trimmed.endsWith(close)) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
 // Helper: convert Wayback timestamp (YYYYMMDDHHMMSS) to ISO string
 function parseWaybackTimestamp(waybackTs) {
   if (!waybackTs || waybackTs.length !== 14) return null;
@@ -96,7 +110,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       const json = typeof data === 'string' ? JSON.parse(data) : data;
       if (json && json.data && json.data.text && json.data.created_at) {
         return {
-          text: json.data.text,
+          text: stripSurroundingQuotes(json.data.text),
           timestamp: json.data.created_at,
         };
       }
@@ -131,7 +145,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     }
     
     if (text && timestamp) {
-      return { text, timestamp };
+      return { text: stripSurroundingQuotes(text), timestamp };
     }
   } catch (err) {
     // Skip failed requests silently
@@ -140,6 +154,78 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
   return null;
 }
 
+// Streaming endpoint for progressive loading
+app.get('/api/tweets/stream/:username', async (req, res) => {
+  const username = req.params.username.replace(/^@/, '');
+  
+  // Set up Server-Sent Events
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Cache-Control'
+  });
+
+  const sendEvent = (type, data) => {
+    res.write(`data: ${JSON.stringify({ type, data })}\n\n`);
+  };
+
+  try {
+    const data = await fetchCDXData(username);
+    
+    const headers = data[0];
+    const urlIdx = headers.indexOf('original');
+    const tsIdx = headers.indexOf('timestamp');
+    
+    const captures = data.slice(1)
+      .filter(row => row[urlIdx] && row[urlIdx].includes('/status/'))
+      .map(row => ({
+        url: row[urlIdx],
+        timestamp: row[tsIdx],
+      }));
+    
+    console.log(`Found ${captures.length} captures for @${username}`);
+    
+    // Limit to most recent 100 captures for performance
+    const recentCaptures = captures.slice(-100);
+    
+    // Send initial progress
+    sendEvent('progress', { total: recentCaptures.length, loaded: 0 });
+    
+    // Process captures with concurrency control and streaming
+    const tweetPromises = recentCaptures.map((cap, index) => {
+      const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
+      return limit.run(async () => {
+        const tweet = await extractTweetFromSnapshot(snapshotUrl, cap.timestamp);
+        if (tweet && tweet.text && tweet.timestamp) {
+          // Send tweet as it's processed
+          sendEvent('tweet', {
+            text: tweet.text,
+            timestamp: tweet.timestamp,
+          });
+        }
+        // Send progress update
+        sendEvent('progress', { total: recentCaptures.length, loaded: index + 1 });
+        return tweet;
+      });
+    });
+    
+    console.log(`Processing ${recentCaptures.length} snapshots with streaming...`);
+    await Promise.all(tweetPromises);
+    
+    // Send completion signal
+    sendEvent('complete', { message: 'All tweets loaded' });
+    
+  } catch (err) {
+    console.error(`Error fetching tweets for @${username}:`, err.message);
+    sendEvent('error', { message: err.message });
+  } finally {
+    res.end();
+  }
+});
+
+// Keep original endpoint for backward compatibility
 app.get('/api/tweets/:username', async (req, res) => {
   const username = req.params.username.replace(/^@/, '');
   
