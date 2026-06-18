@@ -30,6 +30,9 @@ function DefaultAvatar({ className }) {
 
 function App() {
   const [username, setUsername] = useState('')
+  // The username of the profile currently loaded/displayed. Only updates on
+  // submit, so typing a new query doesn't mutate the already-loaded profile.
+  const [loadedUsername, setLoadedUsername] = useState('')
   const [tweets, setTweets] = useState([])
   const [profile, setProfile] = useState(null)
   const [activeTab, setActiveTab] = useState('posts')
@@ -41,7 +44,7 @@ function App() {
   const eventSourceRef = useRef(null)
 
   const cleanUsername = username.replace(/^@/, '')
-  const displayName = profile?.displayName || cleanUsername || 'Unknown'
+  const displayName = profile?.displayName || loadedUsername || 'Unknown'
 
   const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
   const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
@@ -56,6 +59,7 @@ function App() {
     setProgress({ loaded: 0, total: 0 })
     setHasSearched(true)
     if (!cleanUsername.trim()) return
+    setLoadedUsername(cleanUsername)
 
     // Close any existing connection
     if (eventSourceRef.current) {
@@ -120,6 +124,7 @@ function App() {
   const handleTitleClick = () => {
     setHasSearched(false)
     setUsername('')
+    setLoadedUsername('')
     setTweets([])
     setProfile(null)
     setActiveTab('posts')
@@ -142,7 +147,7 @@ function App() {
       <div className="xt-tweet-main">
         <div className="xt-tweet-head">
           <span className="xt-tweet-name">{displayName}</span>
-          <span className="xt-tweet-handle">@{cleanUsername}</span>
+          <span className="xt-tweet-handle">@{loadedUsername}</span>
           <span className="xt-dot">·</span>
           <span className="xt-tweet-time">{formatDate(tweet.timestamp)}</span>
         </div>
@@ -231,7 +236,7 @@ function App() {
 
               <div className="xt-identity">
                 <div className="xt-display-name">{displayName}</div>
-                <div className="xt-handle">@{cleanUsername}</div>
+                <div className="xt-handle">@{loadedUsername}</div>
               </div>
 
               <p className="xt-bio xt-placeholder-text">no bio recovered from the archive yet</p>
