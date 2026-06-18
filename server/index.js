@@ -19,6 +19,14 @@ const PAGE_SIZE = 100;
 const CAPTURE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const captureCache = new Map(); // username -> { captures: [...], expires: number }
 
+// Cache of fully parsed tweets keyed by snapshot URL. Archived tweets never
+// change, so once we've fetched + scraped a snapshot we can serve it from
+// memory forever (within TTL) — making re-scrolls and repeat searches instant
+// and, crucially, sending zero extra requests to the Wayback Machine.
+const TWEET_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const TWEET_CACHE_MAX = 5000; // simple cap to bound memory
+const tweetCache = new Map(); // snapshotUrl -> { tweet: object|null, expires: number }
+
 // Simple concurrency limiter: caps simultaneous outbound requests to Wayback
 class ConcurrencyLimiter {
   constructor(limit) {
@@ -315,6 +323,28 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
   return null;
 }
 
+// Cached wrapper around extractTweetFromSnapshot. The first request for a given
+// snapshot hits Wayback; every later request is served from memory. We cache
+// nulls too (briefly via the same TTL) so known-bad snapshots aren't refetched
+// on every page load.
+async function getTweet(snapshotUrl, waybackTimestamp) {
+  const cached = tweetCache.get(snapshotUrl);
+  if (cached && cached.expires > Date.now()) {
+    return cached.tweet;
+  }
+
+  const tweet = await extractTweetFromSnapshot(snapshotUrl, waybackTimestamp);
+
+  // Naive size bound: once full, drop the oldest entry (Map preserves insertion
+  // order) before inserting the new one.
+  if (tweetCache.size >= TWEET_CACHE_MAX) {
+    const oldestKey = tweetCache.keys().next().value;
+    if (oldestKey !== undefined) tweetCache.delete(oldestKey);
+  }
+  tweetCache.set(snapshotUrl, { tweet, expires: Date.now() + TWEET_CACHE_TTL_MS });
+  return tweet;
+}
+
 // Streaming endpoint for progressive loading (paginated for infinite scroll)
 app.get('/api/tweets/stream/:username', async (req, res) => {
   const username = req.params.username.replace(/^@/, '');
@@ -329,7 +359,14 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     'Access-Control-Allow-Headers': 'Cache-Control'
   });
 
+  // When the client disconnects (e.g. infinite scroll opens the next page, or
+  // the user navigates away), stop processing this page so we don't keep
+  // hammering Wayback with fetches whose results nobody will see.
+  let aborted = false;
+  req.on('close', () => { aborted = true; });
+
   const sendEvent = (type, data) => {
+    if (aborted) return;
     res.write(`data: ${JSON.stringify({ type, data })}\n\n`);
   };
 
@@ -352,7 +389,10 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     const tweetPromises = pageCaptures.map((cap, index) => {
       const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
       return limit.run(async () => {
-        const tweet = await extractTweetFromSnapshot(snapshotUrl, cap.timestamp);
+        // Bail before doing any network work if the client is already gone.
+        if (aborted) return null;
+        const tweet = await getTweet(snapshotUrl, cap.timestamp);
+        if (aborted) return null;
         if (tweet && tweet.text && tweet.timestamp) {
           if (!profileSent && (tweet.displayName || tweet.avatarUrl)) {
             profileSent = true;
@@ -381,6 +421,7 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     console.log(`Processing page ${page} (${pageCaptures.length} snapshots) for @${username}...`);
     await Promise.all(tweetPromises);
     
+    if (aborted) return;
     // Send completion signal (with paging info so the client knows to keep going)
     sendEvent('complete', { page, hasMore });
     
@@ -436,7 +477,7 @@ app.get('/api/tweets/:username', async (req, res) => {
       // Process captures with concurrency control
       const tweetPromises = recentCaptures.map(cap => {
         const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
-        return limit.run(() => extractTweetFromSnapshot(snapshotUrl, cap.timestamp));
+        return limit.run(() => getTweet(snapshotUrl, cap.timestamp));
       });
       
       console.log(`Processing ${recentCaptures.length} snapshots with concurrency control...`);
