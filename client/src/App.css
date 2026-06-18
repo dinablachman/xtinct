@@ -438,6 +438,34 @@
   to { transform: rotate(360deg); }
 }
 
+/* Skeleton placeholders (profile header + streaming tweet rows) */
+.xt-skeleton-avatar,
+.xt-skeleton-line {
+  position: relative;
+  overflow: hidden;
+  background: #e7ecf0;
+}
+
+.xt-skeleton-avatar { border-radius: 50%; }
+
+.xt-skeleton-line {
+  height: 12px;
+  border-radius: 6px;
+  margin: 6px 0;
+}
+
+.xt-skeleton-line--head { width: 40%; }
+.xt-skeleton-line--short { width: 65%; }
+
+.xt-skeleton-avatar::after,
+.xt-skeleton-line::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.6), transparent);
+  animation: shimmer 1.4s infinite;
+}
+
 /* Invisible trigger for infinite scroll; given height so it can intersect. */
 .xt-sentinel {
   height: 1px;

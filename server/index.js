@@ -10,8 +10,15 @@ app.use(cors());
 // Track ongoing requests to prevent duplicates
 const ongoingRequests = new Map();
 
-// Number of tweets served per page (infinite-scroll window).
-const PAGE_SIZE = 100;
+// Tweets per page, ramping up: a tiny first page paints fast, then larger
+// batches fill in on scroll. Pages past the schedule reuse the last size.
+const PAGE_SCHEDULE = [15, 40, 100];
+const sizeForPage = (page) => PAGE_SCHEDULE[Math.min(page, PAGE_SCHEDULE.length - 1)];
+function pageRange(page) {
+  let start = 0;
+  for (let i = 0; i < page; i++) start += sizeForPage(i);
+  return { start, end: start + sizeForPage(page) };
+}
 
 // Cache of deduped, newest-first captures per username so paging through a
 // timeline doesn't re-hit the CDX API on every page. The slow part (snapshot
@@ -224,6 +231,13 @@ function upgradeAvatarSize(url) {
   return (url || '').replace(/_(normal|bigger|mini|reasonably_small)\./, '_400x400.');
 }
 
+// A connection-refused / reset from Wayback means we're being rate-limited or
+// IP-blocked; callers use this to stop hammering a wall.
+function isBlockError(err) {
+  const code = err && (err.code || (err.cause && err.cause.code));
+  return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EAI_AGAIN';
+}
+
 // Helper: fetch and extract tweet content + author identity from a Wayback snapshot
 async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
   const empty = {
@@ -413,12 +427,12 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     // Full newest-first tweet list (cached); page N is a slice of it.
     const ordered = await getOrderedCaptures(username);
     const total = ordered.length;
-    const start = page * PAGE_SIZE;
-    const pageCaptures = ordered.slice(start, start + PAGE_SIZE);
-    const hasMore = start + PAGE_SIZE < total;
+    const { start, end } = pageRange(page);
+    const pageCaptures = ordered.slice(start, end);
+    const hasMore = end < total;
 
     // Tell the client up front how big this page is and whether more exist.
-    sendEvent('meta', { total, page, pageSize: PAGE_SIZE, hasMore, count: pageCaptures.length });
+    sendEvent('meta', { total, page, hasMore, count: pageCaptures.length });
     sendEvent('progress', { total: pageCaptures.length, loaded: 0 });
 
     // Send identity (display name + avatar) once, as soon as we can recover it

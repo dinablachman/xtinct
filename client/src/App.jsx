@@ -74,6 +74,33 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
   )
 })
 
+// Placeholder row shown while tweets are still streaming in, so the timeline
+// visibly fills rather than waiting behind a single spinner.
+const TweetSkeleton = memo(function TweetSkeleton() {
+  return (
+    <li className="xt-tweet xt-tweet-skeleton" aria-hidden="true">
+      <div className="xt-tweet-avatar xt-skeleton-avatar" />
+      <div className="xt-tweet-main">
+        <div className="xt-skeleton-line xt-skeleton-line--head" />
+        <div className="xt-skeleton-line" />
+        <div className="xt-skeleton-line xt-skeleton-line--short" />
+      </div>
+    </li>
+  )
+})
+
+// Merge two newest-first arrays into one newest-first array. O(n + m).
+function mergeDesc(a, b) {
+  const out = []
+  let i = 0, j = 0
+  while (i < a.length && j < b.length) {
+    out.push(new Date(b[j].timestamp) > new Date(a[i].timestamp) ? b[j++] : a[i++])
+  }
+  while (i < a.length) out.push(a[i++])
+  while (j < b.length) out.push(b[j++])
+  return out
+}
+
 function App() {
   const [username, setUsername] = useState('')
   // The username of the profile currently loaded/displayed. Only updates on
@@ -104,6 +131,16 @@ function App() {
   const displayName = profile?.displayName || loadedUsername || 'Unknown'
   const isLoading = streaming || loadingMore
 
+  // How many skeleton rows to show at the bottom of the timeline while a page
+  // streams. Before `meta` arrives (CDX phase) the count is unknown, so show a
+  // small fixed run; afterwards track the unprocessed remainder, capped.
+  const SKELETON_CAP = 8
+  const skeletonCount = !isLoading
+    ? 0
+    : progress.total === 0
+      ? 6
+      : Math.max(0, Math.min(SKELETON_CAP, progress.total - progress.loaded))
+
   const posts = useMemo(() => tweets.filter(t => !t.isReply), [tweets])
   const replies = useMemo(() => tweets.filter(t => t.isReply), [tweets])
   const shown = activeTab === 'posts' ? posts : replies
@@ -125,9 +162,11 @@ function App() {
         }
       }
       if (additions.length === 0) return prev
-      const next = prev.concat(additions)
-      next.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      return next
+      // `prev` is already newest-first; only the (small) additions need sorting,
+      // then a linear merge keeps the list ordered without re-sorting the whole
+      // thing — and without reshuffling rows that are already placed.
+      additions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+      return mergeDesc(prev, additions)
     })
   }
 
@@ -349,13 +388,19 @@ function App() {
               <div className="xt-avatar-wrap">
                 {profile?.avatarUrl ? (
                   <img className="xt-avatar-img" src={profile.avatarUrl} alt={displayName} />
+                ) : isLoading && !profile ? (
+                  <div className="xt-avatar-img xt-skeleton-avatar" />
                 ) : (
                   <DefaultAvatar className="xt-avatar-img xt-avatar-placeholder" />
                 )}
               </div>
 
               <div className="xt-identity">
-                <div className="xt-display-name">{displayName}</div>
+                {!profile?.displayName && isLoading ? (
+                  <div className="xt-display-name xt-skeleton-line" style={{ width: '180px', height: '24px' }} />
+                ) : (
+                  <div className="xt-display-name">{displayName}</div>
+                )}
                 <div className="xt-handle">@{loadedUsername}</div>
               </div>
 
@@ -389,7 +434,7 @@ function App() {
             </div>
 
             {/* Timeline — tweets stream in newest-first, so the top fills first
-                and a "loading more" row sits at the bottom as older ones arrive. */}
+                while skeleton rows sit at the bottom as older ones arrive. */}
             <ul className="xt-tweet-list">
               {shown.map(tweet => (
                 <TweetRow
@@ -400,18 +445,9 @@ function App() {
                   profileAvatarUrl={profileAvatarUrl}
                 />
               ))}
-              {(streaming || loadingMore) && (
-                <li className="xt-loading-row">
-                  <span className="xt-spinner" aria-hidden="true" />
-                  <span>
-                    {streaming && progress.total === 0
-                      ? 'Searching the archive…'
-                      : loadingMore
-                        ? 'Loading more tweets…'
-                        : `Loading archived tweets… ${progress.loaded}/${progress.total}`}
-                  </span>
-                </li>
-              )}
+              {Array.from({ length: skeletonCount }).map((_, i) => (
+                <TweetSkeleton key={`sk-${i}`} />
+              ))}
               {!streaming && !loadingMore && shown.length === 0 && (
                 <li className="xt-empty">No {activeTab} found in the archive.</li>
               )}
