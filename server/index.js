@@ -60,7 +60,7 @@ class ConcurrencyLimiter {
   }
 }
 
-const limit = new ConcurrencyLimiter(5);
+const limit = new ConcurrencyLimiter(3);
 
 // Helper: strip surrounding quotes from text (e.g. from og:description)
 function stripSurroundingQuotes(text) {
@@ -114,11 +114,10 @@ async function raceCDXUrls(cdxUrls) {
   try {
     return await Promise.any(requests);
   } finally {
-    // Cancel any still-in-flight siblings (no-op once they've settled) and
-    // attach a no-op catch so the aborted losers don't surface as unhandled
-    // rejections.
+    // Cancel any still-in-flight siblings (no-op once they've settled). Promise.any
+    // already attaches reject handlers to every input, so the aborted losers won't
+    // surface as unhandled rejections.
     controllers.forEach(c => c.abort());
-    requests.forEach(p => p.catch(() => {}));
   }
 }
 
@@ -231,11 +230,14 @@ function upgradeAvatarSize(url) {
   return (url || '').replace(/_(normal|bigger|mini|reasonably_small)\./, '_400x400.');
 }
 
-// A connection-refused / reset from Wayback means we're being rate-limited or
-// IP-blocked; callers use this to stop hammering a wall.
+// A connection refusal/reset OR an explicit rate-limit status (429/503) from
+// Wayback means we're being throttled or IP-blocked; callers use this to stop
+// hammering a wall (and to avoid caching the failure as a "no tweet").
 function isBlockError(err) {
   const code = err && (err.code || (err.cause && err.cause.code));
-  return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EAI_AGAIN';
+  const status = err && err.response && err.response.status;
+  return code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'EAI_AGAIN'
+    || status === 429 || status === 503;
 }
 
 // Helper: fetch and extract tweet content + author identity from a Wayback snapshot
@@ -248,6 +250,8 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     media: [],
   };
   try {
+    // Jitter so the few concurrent workers don't hit Wayback in lockstep bursts.
+    await new Promise(r => setTimeout(r, 50 + Math.random() * 150));
     const { data, headers } = await axios.get(snapshotUrl, {
       headers: { 'User-Agent': 'Mozilla/5.0' },
       timeout: 7000, // 7 second timeout per request
@@ -370,6 +374,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       };
     }
   } catch (err) {
+    if (isBlockError(err)) throw err; // surface so the page can bail early
     // Skip failed requests silently
     console.log(`Failed to fetch ${snapshotUrl}: ${err.message}`);
   }
@@ -416,6 +421,12 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
   // the user navigates away), stop processing this page so we don't keep
   // hammering Wayback with fetches whose results nobody will see.
   let aborted = false;
+  // Circuit breaker: once Wayback starts refusing connections, stop firing the
+  // rest of this page's fetches (hammering a wall only prolongs the block).
+  // Per-request scope means it resets on the next page — no sticky global block.
+  let circuitOpen = false;
+  let connectionFailures = 0;
+  const BLOCK_THRESHOLD = 3;
   req.on('close', () => { aborted = true; });
 
   const sendEvent = (type, data) => {
@@ -442,39 +453,57 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     const tweetPromises = pageCaptures.map((cap, index) => {
       const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
       return limit.run(async () => {
-        // Bail before doing any network work if the client is already gone.
-        if (aborted) return null;
-        const tweet = await getTweet(snapshotUrl, cap.timestamp);
-        if (aborted) return null;
-        if (tweet && tweet.text && tweet.timestamp) {
-          if (!profileSent && (tweet.displayName || tweet.avatarUrl)) {
-            profileSent = true;
-            sendEvent('profile', {
-              handle: username,
-              displayName: tweet.displayName,
+        // Bail before doing any network work if the client is gone or the
+        // breaker already tripped (Wayback is refusing us).
+        if (aborted || circuitOpen) return null;
+        try {
+          const tweet = await getTweet(snapshotUrl, cap.timestamp);
+          if (aborted) return null;
+          // A fetch that returned (even an empty parse) proves the connection is
+          // alive, so the breaker counts only *consecutive* failures, not stray
+          // resets scattered across an otherwise-healthy page.
+          connectionFailures = 0;
+          if (tweet && tweet.text && tweet.timestamp) {
+            if (!profileSent && (tweet.displayName || tweet.avatarUrl)) {
+              profileSent = true;
+              sendEvent('profile', {
+                handle: username,
+                displayName: tweet.displayName,
+                avatarUrl: tweet.avatarUrl,
+              });
+            }
+            // Send tweet as it's processed
+            sendEvent('tweet', {
+              text: tweet.text,
+              timestamp: tweet.timestamp,
+              isReply: tweet.isReply,
+              replyingTo: tweet.replyingTo,
               avatarUrl: tweet.avatarUrl,
+              media: tweet.media,
             });
           }
-          // Send tweet as it's processed
-          sendEvent('tweet', {
-            text: tweet.text,
-            timestamp: tweet.timestamp,
-            isReply: tweet.isReply,
-            replyingTo: tweet.replyingTo,
-            avatarUrl: tweet.avatarUrl,
-            media: tweet.media,
-          });
+          // Send progress update
+          sendEvent('progress', { total: pageCaptures.length, loaded: index + 1 });
+          return tweet;
+        } catch (err) {
+          if (isBlockError(err)) {
+            connectionFailures++;
+            if (!circuitOpen && connectionFailures >= BLOCK_THRESHOLD) {
+              circuitOpen = true;
+              console.warn(`Circuit opened for @${username}: Wayback refusing connections`);
+              sendEvent('error', { message: 'The archive is rate-limiting requests right now. Wait a moment and try again.' });
+            }
+          }
+          return null; // resolve so Promise.all settles; queued tasks see circuitOpen
         }
-        // Send progress update
-        sendEvent('progress', { total: pageCaptures.length, loaded: index + 1 });
-        return tweet;
       });
     });
     
     console.log(`Processing page ${page} (${pageCaptures.length} snapshots) for @${username}...`);
     await Promise.all(tweetPromises);
     
-    if (aborted) return;
+    // Skip completion if the client left or the breaker tripped (error already sent).
+    if (aborted || circuitOpen) return;
     // Send completion signal (with paging info so the client knows to keep going)
     sendEvent('complete', { page, hasMore });
     

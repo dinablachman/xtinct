@@ -78,7 +78,7 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
 // visibly fills rather than waiting behind a single spinner.
 const TweetSkeleton = memo(function TweetSkeleton() {
   return (
-    <li className="xt-tweet xt-tweet-skeleton" aria-hidden="true">
+    <li className="xt-tweet" aria-hidden="true">
       <div className="xt-tweet-avatar xt-skeleton-avatar" />
       <div className="xt-tweet-main">
         <div className="xt-skeleton-line xt-skeleton-line--head" />
@@ -89,16 +89,10 @@ const TweetSkeleton = memo(function TweetSkeleton() {
   )
 })
 
-// Merge two newest-first arrays into one newest-first array. O(n + m).
-function mergeDesc(a, b) {
-  const out = []
-  let i = 0, j = 0
-  while (i < a.length && j < b.length) {
-    out.push(new Date(b[j].timestamp) > new Date(a[i].timestamp) ? b[j++] : a[i++])
-  }
-  while (i < a.length) out.push(a[i++])
-  while (j < b.length) out.push(b[j++])
-  return out
+// Sort newest-first by tweet creation time. Applied once per page (on finish),
+// not on every flush, so rows don't jump while a page is still streaming in.
+function sortByNewest(list) {
+  return [...list].sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
 }
 
 function App() {
@@ -162,11 +156,9 @@ function App() {
         }
       }
       if (additions.length === 0) return prev
-      // `prev` is already newest-first; only the (small) additions need sorting,
-      // then a linear merge keeps the list ordered without re-sorting the whole
-      // thing — and without reshuffling rows that are already placed.
-      additions.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-      return mergeDesc(prev, additions)
+      // Append in arrival order so already-rendered rows never move mid-stream;
+      // the list is snap-sorted newest-first once the page finishes (see finish()).
+      return prev.concat(additions)
     })
   }
 
@@ -204,6 +196,10 @@ function App() {
           clearTimeout(flushTimerRef.current)
         }
         flushTweetBuffer()
+        // Now the page is done, snap the accumulated list into newest-first order.
+        // Doing it here (once per page) rather than on every flush keeps rows from
+        // jumping around while tweets are still streaming in out of fetch order.
+        setTweets(sortByNewest)
         setStreaming(false)
         setLoading(false)
         setLoadingMore(false)
@@ -245,6 +241,9 @@ function App() {
             break
           case 'error':
             setError(data.message || 'Failed to fetch tweets.')
+            // Drop the sentinel so infinite scroll stops auto-retrying into the
+            // same error (which would re-hammer Wayback and prolong a block).
+            setHasMore(false)
             finish()
             break
         }
@@ -397,7 +396,7 @@ function App() {
 
               <div className="xt-identity">
                 {!profile?.displayName && isLoading ? (
-                  <div className="xt-display-name xt-skeleton-line" style={{ width: '180px', height: '24px' }} />
+                  <div className="xt-display-name xt-skeleton-line xt-skeleton-line--name" />
                 ) : (
                   <div className="xt-display-name">{displayName}</div>
                 )}

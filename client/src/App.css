@@ -411,33 +411,6 @@
   background: var(--tw-blue);
 }
 
-/* Loading */
-/* "Loading more" row at the bottom of the timeline */
-.xt-loading-row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 16px 18px;
-  color: var(--tw-text-muted);
-  font-size: 14px;
-  border-bottom: 1px solid var(--tw-border);
-}
-
-.xt-spinner {
-  width: 18px;
-  height: 18px;
-  border: 2px solid #e1e8ed;
-  border-top-color: var(--tw-blue);
-  border-radius: 50%;
-  animation: xt-spin 0.7s linear infinite;
-  flex: 0 0 auto;
-}
-
-@keyframes xt-spin {
-  to { transform: rotate(360deg); }
-}
-
 /* Skeleton placeholders (profile header + streaming tweet rows) */
 .xt-skeleton-avatar,
 .xt-skeleton-line {
@@ -456,6 +429,7 @@
 
 .xt-skeleton-line--head { width: 40%; }
 .xt-skeleton-line--short { width: 65%; }
+.xt-skeleton-line--name { width: 180px; height: 24px; }
 
 .xt-skeleton-avatar::after,
 .xt-skeleton-line::after {
