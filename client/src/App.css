@@ -656,6 +656,10 @@
   text-decoration: underline;
 }
 
+.xt-mention {
+  color: var(--tw-blue);
+}
+
 .xt-empty {
   padding: 48px 18px;
   text-align: center;

@@ -17,7 +17,8 @@ function stripLeadingMentions(text) {
   return (text || '').replace(/^(?:@\w{1,15}\s+)+/, '').trim()
 }
 
-const URL_RE = /(https?:\/\/[^\s]+)/g
+// Matches either a URL or an @mention (Twitter handles are 1-15 word chars).
+const TOKEN_RE = /(https?:\/\/[^\s]+|@\w{1,15})/g
 
 // When a tweet has media, Twitter drops the trailing t.co self-link (it just
 // points back at the tweet's own media), so we do the same to avoid a dangling
@@ -26,15 +27,17 @@ function stripTrailingTco(text) {
   return (text || '').replace(/\s*https?:\/\/t\.co\/\w+\s*$/, '').trim()
 }
 
-// Split text on URLs and render the URLs as clickable links. Keeps the inline
-// link "active" without embedding anything itself.
+// Split text into URLs, @mentions, and plain text. URLs become clickable links;
+// @mentions get the accent color (in any tweet, reply or not), matching Twitter.
 function renderTextWithLinks(text) {
-  const parts = (text || '').split(URL_RE)
+  const parts = (text || '').split(TOKEN_RE)
   return parts.map((part, i) => {
-    if (i % 2 === 1) {
-      return (
-        <a key={i} href={part} target="_blank" rel="noopener noreferrer">{part}</a>
-      )
+    if (!part) return null
+    if (/^https?:\/\//.test(part)) {
+      return <a key={i} href={part} target="_blank" rel="noopener noreferrer">{part}</a>
+    }
+    if (/^@\w{1,15}$/.test(part)) {
+      return <span key={i} className="xt-mention">{part}</span>
     }
     return part
   })
