@@ -236,6 +236,37 @@
   background: var(--tw-bg);
 }
 
+/* Floating jump-to-top button, centered just below the sticky search bar. */
+.xt-jump-top {
+  position: fixed;
+  top: 70px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--tw-border);
+  background: var(--tw-blue);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.xt-jump-top:hover {
+  transform: translateX(-50%) scale(1.06);
+}
+
+.xt-jump-top svg {
+  width: 22px;
+  height: 22px;
+  fill: currentColor;
+}
+
 /* Search bar (replaces the Figma phone status bar) */
 .xt-searchbar {
   position: sticky;
@@ -250,9 +281,39 @@
   max-width: 1040px;
   margin: 0 auto;
   padding: 10px 18px;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 16px;
+}
+
+.xt-headbar-left {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1.25;
+  min-width: 0;
+}
+
+.xt-headbar-name {
+  font-weight: 800;
+  font-size: 17px;
+  color: var(--tw-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xt-headbar-count {
+  font-size: 13px;
+  color: var(--tw-text-muted);
+}
+
+.xt-headbar-name-skeleton {
+  width: 130px;
+  height: 17px;
+  border-radius: 6px;
+  margin: 3px 0;
 }
 
 .xt-brand {

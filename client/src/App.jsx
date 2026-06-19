@@ -249,8 +249,13 @@ function App() {
   // Whether the bottom-of-list sentinel is in view (driven solely by the observer).
   const [atListEnd, setAtListEnd] = useState(false)
   const [progress, setProgress] = useState({ loaded: 0, total: 0 })
+  // Total archived tweets for the account (from the stream's meta event), shown
+  // as the post count in the collapsed sticky header.
+  const [totalPosts, setTotalPosts] = useState(0)
   const [error, setError] = useState('')
   const [hasSearched, setHasSearched] = useState(false)
+  // Show the floating jump-to-top button once the user has scrolled down a bit.
+  const [showJumpTop, setShowJumpTop] = useState(false)
   const eventSourceRef = useRef(null)
   const sentinelRef = useRef(null)
   // Incoming tweets are buffered and flushed in chunks (rather than one state
@@ -352,6 +357,7 @@ function App() {
         switch (type) {
           case 'meta':
             setHasMore(data.hasMore)
+            if (typeof data.total === 'number') setTotalPosts(data.total)
             break
           case 'progress':
             setProgress(data)
@@ -441,6 +447,7 @@ function App() {
     setProfile(null)
     setActiveTab('posts')
     setProgress({ loaded: 0, total: 0 })
+    setTotalPosts(0)
     setHasMore(false)
     setAtListEnd(false)
     setPage(0)
@@ -478,6 +485,13 @@ function App() {
     }
   }, [atListEnd, hasMore, isLoading, loadedUsername, page])
 
+  useEffect(() => {
+    const onScroll = () => setShowJumpTop(window.scrollY > 400)
+    window.addEventListener('scroll', onScroll, { passive: true })
+    onScroll()
+    return () => window.removeEventListener('scroll', onScroll)
+  }, [])
+
   const handleTitleClick = () => {
     setHasSearched(false)
     setUsername('')
@@ -489,6 +503,7 @@ function App() {
     setActiveTab('posts')
     setError('')
     setProgress({ loaded: 0, total: 0 })
+    setTotalPosts(0)
     setHasMore(false)
     setAtListEnd(false)
     setPage(0)
@@ -527,9 +542,34 @@ function App() {
       ) : (
         // Results screen - Twitter-style profile layout
         <div className="xt-app">
-          {/* Search bar replaces the Figma status bar */}
+          {showJumpTop && (
+            <button
+              type="button"
+              className="xt-jump-top"
+              aria-label="Jump to top"
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 7.4l-7 7 1.4 1.4L12 10.2l5.6 5.6 1.4-1.4z" />
+              </svg>
+            </button>
+          )}
+          {/* Collapsed sticky header (Twitter-style): name + post count on the
+              left, brand centered, search on the right. */}
           <header className="xt-searchbar">
             <div className="xt-searchbar-inner">
+              <div className="xt-headbar-left">
+                {profile?.displayName ? (
+                  <div className="xt-headbar-name">{profile.displayName}</div>
+                ) : isLoading ? (
+                  <div className="xt-headbar-name-skeleton xt-skeleton-line" />
+                ) : (
+                  <div className="xt-headbar-name">{displayName}</div>
+                )}
+                {totalPosts > 0 && (
+                  <div className="xt-headbar-count">{totalPosts.toLocaleString()} archived posts</div>
+                )}
+              </div>
               <div className="xt-brand" onClick={handleTitleClick}>xTinct</div>
               <form onSubmit={handleSubmit} className="xt-search-form">
                 <input
