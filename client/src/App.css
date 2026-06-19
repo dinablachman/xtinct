@@ -589,6 +589,21 @@
 .xt-media-link {
   position: relative;
   display: block;
+  /* Square framed box, kept even when the archived poster is missing/broken
+     (otherwise the link collapses to 0 height and only the play button shows). */
+  aspect-ratio: 1 / 1;
+  border: 1px solid var(--tw-border);
+  border-radius: 12px;
+  background: #e7ecf0;
+  overflow: hidden;
+}
+
+.xt-media-link img {
+  border: none;
+  border-radius: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .xt-media-badge {

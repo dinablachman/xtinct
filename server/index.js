@@ -76,6 +76,22 @@ function stripSurroundingQuotes(text) {
   return trimmed;
 }
 
+// Archived og:description is double-encoded, so cheerio's one decode pass leaves
+// a stray layer (e.g. "&amp;" instead of "&"). Decode that remaining layer.
+// "&amp;" is handled last so "&amp;lt;" doesn't collapse into "<".
+function decodeEntities(text) {
+  if (!text) return text;
+  return text
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 // Helper: convert Wayback timestamp (YYYYMMDDHHMMSS) to ISO string
 function parseWaybackTimestamp(waybackTs) {
   if (!waybackTs || waybackTs.length !== 14) return null;
@@ -302,7 +318,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     }
     // Strip wrapping quotes now so downstream checks (e.g. leading @mention
     // reply detection) see the real first character, not a curly quote.
-    text = stripSurroundingQuotes(text);
+    text = stripSurroundingQuotes(decodeEntities(text));
     
     // Try to find timestamp from tweet content first
     let timestamp = $('meta[property="article:published_time"]').attr('content') || '';
