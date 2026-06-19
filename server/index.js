@@ -310,8 +310,14 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       timestamp = $('time').attr('datetime') || '';
     }
     if (!timestamp) {
-      // Additional timestamp selectors
-      timestamp = $('.tweet-timestamp').attr('title') || $('.js-tweet-timestamp').attr('title') || '';
+      // Classic permalink stores a machine-readable epoch on the timestamp
+      // element; prefer it over the human title ("4:24 PM - 8 Aug 2021"), which
+      // new Date() can't parse and would render as "No date found".
+      const tsEl = permalinkTweet.find('[data-time-ms], [data-time]').first();
+      const ms = tsEl.attr('data-time-ms');
+      const secs = tsEl.attr('data-time');
+      if (ms) timestamp = new Date(Number(ms)).toISOString();
+      else if (secs) timestamp = new Date(Number(secs) * 1000).toISOString();
     }
     
     // If no tweet timestamp found, use Wayback timestamp as fallback
@@ -458,7 +464,13 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       .find('.card2, .js-macaw-cards-iframe-container, [data-card2-name], [data-card-name]')
       .each((i, el) => {
         const $el = $(el);
-        const href = $el.attr('data-card-url') || $el.attr('data-card-href') || '';
+        // Polls render via an iframe whose options/results Wayback never
+        // archives, leaving an empty shell — skip them rather than show a blank.
+        const cardName = ($el.attr('data-card2-name') || $el.attr('data-card-name') || '').toLowerCase();
+        if (/poll/.test(cardName)) return;
+        // "card://<id>" is Twitter's internal card scheme, not a real link.
+        let href = $el.attr('data-card-url') || $el.attr('data-card-href') || '';
+        if (/^card:\/\//i.test(href)) href = '';
         const title = $el.find('.card2-text, .SummaryCard-title, [class*="title"]').first().text().trim();
         const description = $el.find('.SummaryCard-description, [class*="description"]').first().text().trim();
         const imgSrc = $el.find('img').first().attr('src')
@@ -475,6 +487,10 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
     for (const card of cards) media.push(card);
 
     if (text && timestamp) {
+      // Classic tweet pages embed the author's ProfileHeaderCard sidebar (bio,
+      // location, website, join date, stats, banner). Harvest it so accounts
+      // whose profile page was never archived still get a real header.
+      const profile = extractProfileFromSnapshot($, waybackTimestamp);
       return {
         text,
         timestamp,
@@ -483,6 +499,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
         displayName,
         avatarUrl,
         media,
+        profile,
       };
     }
   } catch (err) {
@@ -578,10 +595,11 @@ async function getProfileCaptures(username) {
   return [...classicFirst, ...modern];
 }
 
-// Parse a single archived profile page into a fields object. Returns null for
-// empty React-era shells (no classic markup) so callers can skip them.
-function extractProfileFromSnapshot(html, waybackTimestamp) {
-  const $ = cheerio.load(html);
+// Parse the classic ProfileHeaderCard markup into a fields object. Works on a
+// loaded cheerio instance, so it can run against both the profile page AND a
+// classic tweet permalink (which embeds the same author sidebar). Returns null
+// when no classic markup is present (e.g. empty React-era shells).
+function extractProfileFromSnapshot($, waybackTimestamp) {
   const avatarEl = $('.ProfileAvatar-image').first();
   // Empty-shell guard: none of the classic profile markup is present.
   if ($('.ProfileHeaderCard').length === 0 && avatarEl.length === 0 && $('.ProfileNav').length === 0) {
@@ -660,7 +678,7 @@ async function getProfile(username) {
           headers: { 'User-Agent': 'Mozilla/5.0' },
           timeout: 7000,
         });
-        return extractProfileFromSnapshot(data, cap.timestamp);
+        return extractProfileFromSnapshot(cheerio.load(data), cap.timestamp);
       });
     } catch (err) {
       if (isBlockError(err)) break; // stop hammering a throttling wall
@@ -736,12 +754,15 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     sendEvent('meta', { total, page, hasMore, count: pageCaptures.length });
     sendEvent('progress', { total: pageCaptures.length, loaded: 0 });
 
-    // Tweet-derived identity fallback, sent per-field as soon as the first
-    // tweet with a name/avatar arrives. The full archived profile (bio, banner,
-    // stats, etc.) is fetched separately via GET /api/profile so it never gates
-    // this stream; the client merges the two and lets the archived data win.
-    let sentFallbackName = false;
-    let sentFallbackAvatar = false;
+    // Tweet-derived profile fallback, sent per-field as soon as the first tweet
+    // carrying each field arrives. Classic tweet permalinks embed the author's
+    // ProfileHeaderCard (bio, location, website, join date, stats, banner), so
+    // accounts whose profile page was never archived still get a full header.
+    // The full archived profile is also fetched separately via GET /api/profile
+    // so it never gates this stream; the client merges the two and lets the
+    // archived data win.
+    const sentFields = new Set();
+    const FALLBACK_FIELDS = ['displayName', 'avatarUrl', 'bannerUrl', 'bio', 'location', 'joinDate', 'website', 'following', 'followers'];
 
     // Process this page's captures with concurrency control and streaming
     const tweetPromises = pageCaptures.map((cap, index) => {
@@ -758,20 +779,30 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
           // resets scattered across an otherwise-healthy page.
           connectionFailures = 0;
           if (tweet && tweet.text && tweet.timestamp) {
-            // Emit name/avatar from the first tweet that has them, per-field.
-            // The client treats this as a fill-only fallback, so the richer
-            // /api/profile data takes precedence when it arrives. Crucially, the
-            // avatar is only adopted from a NON-reply tweet: on a reply permalink
-            // the first profile image on the page can be the replied-to user's,
-            // not the account's. This becomes the single avatar used for all rows.
+            // Emit profile fields from the first tweet that carries each, per-
+            // field. The client treats this as a fill-only fallback, so the
+            // richer /api/profile data takes precedence when it arrives. The
+            // embedded ProfileHeaderCard (tweet.profile) belongs to the permalink
+            // author, so its name/avatar/bio/etc. are reliable even on replies.
+            const card = tweet.profile || {};
             const patch = {};
-            if (!sentFallbackName && tweet.displayName) {
-              patch.displayName = tweet.displayName;
-              sentFallbackName = true;
+            for (const f of FALLBACK_FIELDS) {
+              if (!sentFields.has(f) && card[f]) {
+                patch[f] = card[f];
+                sentFields.add(f);
+              }
             }
-            if (!sentFallbackAvatar && tweet.avatarUrl && !tweet.isReply) {
+            // If the classic card didn't supply name/avatar, fall back to the
+            // tweet header. The avatar is only adopted from a NON-reply tweet: on
+            // a reply permalink the first profile image can be the replied-to
+            // user's, not the account's.
+            if (!sentFields.has('displayName') && tweet.displayName) {
+              patch.displayName = tweet.displayName;
+              sentFields.add('displayName');
+            }
+            if (!sentFields.has('avatarUrl') && tweet.avatarUrl && !tweet.isReply) {
               patch.avatarUrl = tweet.avatarUrl;
-              sentFallbackAvatar = true;
+              sentFields.add('avatarUrl');
             }
             if (Object.keys(patch).length > 0) {
               sendEvent('profile', { handle: username, ...patch });

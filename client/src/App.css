@@ -371,11 +371,24 @@
 
 .xt-meta {
   display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
+  flex-direction: column;
+  gap: 6px;
   color: var(--tw-text-muted);
-  font-size: 14px;
+  font-size: 15px;
   margin-bottom: 12px;
+}
+
+.xt-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xt-meta-icon {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  fill: var(--tw-text-muted);
 }
 
 .xt-stats {

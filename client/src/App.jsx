@@ -54,6 +54,67 @@ function DefaultAvatar({ className }) {
   )
 }
 
+// Avatar that falls back to the blank default when the archived image is
+// missing/broken (so we never render a broken-image icon). We remember *which*
+// src failed rather than a bare boolean, so when a new src arrives (e.g. the
+// streamed fallback is later replaced by the real /api/profile avatar) it
+// retries automatically — no key/remount needed.
+function Avatar({ src, alt, imgClassName, placeholderClassName }) {
+  const [failedSrc, setFailedSrc] = useState(null)
+  if (!src || src === failedSrc) {
+    return <DefaultAvatar className={placeholderClassName} />
+  }
+  return (
+    <img
+      className={imgClassName}
+      src={src}
+      alt={alt}
+      loading="lazy"
+      onError={() => setFailedSrc(src)}
+    />
+  )
+}
+
+// Banner that falls back to the gradient default when the archived header image
+// is missing/broken. Same failed-src tracking as Avatar so a later real src
+// retries on its own.
+function Banner({ src }) {
+  const [failedSrc, setFailedSrc] = useState(null)
+  if (!src || src === failedSrc) {
+    return <div className="xt-banner" aria-hidden="true" />
+  }
+  return (
+    <div className="xt-banner xt-banner--img">
+      <img src={src} alt="" onError={() => setFailedSrc(src)} />
+    </div>
+  )
+}
+
+// Profile meta icons (location pin, link, calendar) matching Twitter's set.
+function LocationIcon() {
+  return (
+    <svg className="xt-meta-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <g><path d="M12 14.315c-2.088 0-3.787-1.698-3.787-3.786S9.913 6.74 12 6.74s3.787 1.7 3.787 3.787-1.7 3.785-3.787 3.785zm0-6.073c-1.26 0-2.287 1.026-2.287 2.287S10.74 12.815 12 12.815s2.287-1.025 2.287-2.286S13.26 8.24 12 8.24z"></path><path d="M20.692 10.69C20.692 5.9 16.792 2 12 2s-8.692 3.9-8.692 8.69c0 1.902.602 3.708 1.748 5.23l6.44 8.585c.142.19.342.295.504.295s.362-.105.504-.294l6.44-8.585c1.146-1.523 1.748-3.33 1.748-5.23zm-8.692 12.16l-5.836-7.782c-.95-1.262-1.45-2.76-1.45-4.328C4.714 6.726 7.978 3.5 12 3.5s7.286 3.226 7.286 7.19c0 1.567-.5 3.066-1.45 4.328L12 22.85z"></path></g>
+    </svg>
+  )
+}
+
+function LinkIcon() {
+  return (
+    <svg className="xt-meta-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <g><path d="M18.36 5.64c-1.95-1.96-5.11-1.96-7.07 0L9.88 7.05 8.46 5.64l1.42-1.42c2.73-2.73 7.16-2.73 9.9 0 2.73 2.74 2.73 7.17 0 9.9l-1.42 1.42-1.41-1.42 1.41-1.41c1.96-1.96 1.96-5.12 0-7.07zm-2.12 3.53l-7.07 7.07-1.41-1.41 7.07-7.07 1.41 1.41zm-12.02.71l1.42-1.42 1.41 1.42-1.41 1.41c-1.96 1.96-1.96 5.12 0 7.07 1.95 1.96 5.11 1.96 7.07 0l1.41-1.41 1.42 1.41-1.42 1.42c-2.73 2.73-7.16 2.73-9.9 0-2.73-2.74-2.73-7.17 0-9.9z"></path></g>
+    </svg>
+  )
+}
+
+function CalendarIcon() {
+  return (
+    <svg className="xt-meta-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <g><path d="M7 4V3h2v1h6V3h2v1h1.5C19.89 4 21 5.12 21 6.5v12c0 1.38-1.11 2.5-2.5 2.5h-13C4.12 21 3 19.88 3 18.5v-12C3 5.12 4.12 4 5.5 4H7zm0 2H5.5c-.27 0-.5.22-.5.5v12c0 .28.23.5.5.5h13c.28 0 .5-.22.5-.5v-12c0-.28-.22-.5-.5-.5H17v1h-2V6H9v1H7V6zm0 6h2v-2H7v2zm0 4h2v-2H7v2zm4-4h2v-2h-2v2zm0 4h2v-2h-2v2zm4-4h2v-2h-2v2z"></path></g>
+    </svg>
+  )
+}
+
 // Stable identity for a tweet, used both for dedup and as the React key. Using
 // content (not array index) keeps keys stable across re-sorts, so React moves
 // existing rows instead of remounting them — which is what kills the jank.
@@ -116,11 +177,7 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
   return (
     <li className="xt-tweet">
       <div className="xt-tweet-avatar">
-        {avatarUrl ? (
-          <img src={avatarUrl} alt="" loading="lazy" />
-        ) : (
-          <DefaultAvatar className="xt-avatar-placeholder" />
-        )}
+        <Avatar src={avatarUrl} alt="" placeholderClassName="xt-avatar-placeholder" />
       </div>
       <div className="xt-tweet-main">
         <div className="xt-tweet-head">
@@ -494,19 +551,13 @@ function App() {
             {error && <div className="tw-error" style={{ padding: '12px 18px', margin: 0 }}>{error}</div>}
 
             {/* Banner — archived header image when recovered, else the gradient */}
-            {profile?.bannerUrl ? (
-              <div className="xt-banner xt-banner--img">
-                <img src={profile.bannerUrl} alt="" />
-              </div>
-            ) : (
-              <div className="xt-banner" aria-hidden="true" />
-            )}
+            <Banner src={profile?.bannerUrl} />
 
             {/* Profile header card */}
             <div className="xt-header">
               <div className="xt-avatar-wrap">
                 {profile?.avatarUrl ? (
-                  <img className="xt-avatar-img" src={profile.avatarUrl} alt={displayName} />
+                  <Avatar src={profile.avatarUrl} alt={displayName} imgClassName="xt-avatar-img" placeholderClassName="xt-avatar-img xt-avatar-placeholder" />
                 ) : isLoading && !profile ? (
                   <div className="xt-avatar-img xt-skeleton-avatar" />
                 ) : (
@@ -527,15 +578,20 @@ function App() {
 
               {(profile?.location || profile?.website || profile?.joinDate) && (
                 <div className="xt-meta">
-                  {profile?.location && <span className="xt-meta-item">{profile.location}</span>}
+                  {profile?.location && (
+                    <span className="xt-meta-item"><LocationIcon />{profile.location}</span>
+                  )}
                   {profile?.website && (
                     <span className="xt-meta-item">
+                      <LinkIcon />
                       <a className="xt-website" href={/^https?:\/\//.test(profile.website) ? profile.website : `https://${profile.website}`} target="_blank" rel="noopener noreferrer">
                         {profile.website.replace(/^https?:\/\//, '')}
                       </a>
                     </span>
                   )}
-                  {profile?.joinDate && <span className="xt-meta-item">Joined {profile.joinDate}</span>}
+                  {profile?.joinDate && (
+                    <span className="xt-meta-item"><CalendarIcon />Joined {profile.joinDate}</span>
+                  )}
                 </div>
               )}
 
