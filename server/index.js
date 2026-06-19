@@ -225,6 +225,21 @@ function archiveImageUrl(originalUrl, waybackTimestamp) {
   return `https://web.archive.org/web/${waybackTimestamp}im_/${https}`;
 }
 
+// Like archiveImageUrl but uses the `id_` (identity) modifier, which serves the
+// raw archived bytes for any resource — used for video/GIF streams where the
+// image-only `im_` rewrite isn't appropriate.
+function archiveMediaUrl(originalUrl, waybackTimestamp) {
+  if (!originalUrl) return '';
+  const https = originalUrl.replace(/^http:/, 'https:');
+  return `https://web.archive.org/web/${waybackTimestamp}id_/${https}`;
+}
+
+// Pull the first CSS background-image URL out of an inline style attribute.
+function backgroundImageUrl(style) {
+  const m = (style || '').match(/url\(['"]?([^'")]+)['"]?\)/);
+  return m ? m[1] : '';
+}
+
 // Helper: upgrade a Twitter profile image to a larger variant for crisp avatars
 function upgradeAvatarSize(url) {
   return (url || '').replace(/_(normal|bigger|mini|reasonably_small)\./, '_400x400.');
@@ -351,17 +366,106 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       ? archiveImageUrl(upgradeAvatarSize(avatarOriginal), waybackTimestamp)
       : '';
 
-    // --- in-tweet media (photos) ---
+    // The archived page URL (without the `id_` raw modifier), used as the
+    // click-through fallback for media we can't play inline.
+    const archivedPageUrl = snapshotUrl.replace(/(\/web\/\d+)id_\//, '$1/');
+
+    // --- in-tweet media (photos, video, GIFs) ---
+    // Each item is { type, src, poster?, href? }. `src` may be null for video
+    // whose stream Wayback never captured — the client then shows the poster
+    // as a thumbnail linking to the archived tweet.
     const media = [];
-    permalinkTweet
+    const seenMedia = new Set();
+    const pushMedia = (item) => {
+      const key = item.src || item.poster;
+      if (!key || seenMedia.has(key)) return;
+      seenMedia.add(key);
+      media.push(item);
+    };
+    const scope = permalinkTweet.length ? permalinkTweet : $.root();
+
+    // Photos
+    scope
       .find('.AdaptiveMedia-photoContainer img, .js-adaptive-photo img, .media-thumbnail img')
       .each((i, el) => {
         const src = $(el).attr('src') || $(el).attr('data-image-url') || '';
-        if (src && /twimg\.com\/media/.test(src)) {
-          media.push(archiveImageUrl(src, waybackTimestamp));
+        if (src && /pbs\.twimg\.com/.test(src) && !/profile_images/.test(src)) {
+          pushMedia({ type: 'photo', src: archiveImageUrl(src, waybackTimestamp) });
         }
       });
-    
+
+    // Native <video>/<source> elements (when the archived HTML actually
+    // contains the stream rather than lazy-loading it).
+    scope.find('video').each((i, el) => {
+      const poster = $(el).attr('poster') || '';
+      const src = $(el).attr('src') || $(el).find('source').first().attr('src') || '';
+      const isGif = /tweet_video/.test(src) || $(el).closest('.PlayableMedia--gif').length > 0;
+      pushMedia({
+        type: isGif ? 'gif' : 'video',
+        src: src ? archiveMediaUrl(src, waybackTimestamp) : null,
+        poster: poster ? archiveImageUrl(poster, waybackTimestamp) : '',
+        href: archivedPageUrl,
+      });
+    });
+
+    // Playable-media containers where the stream is loaded via API (not in the
+    // HTML) — recover at least the poster from the container's background-image.
+    scope
+      .find('.PlayableMedia-player, .AdaptiveMedia-videoContainer .AdaptiveMedia-video')
+      .each((i, el) => {
+        const poster = backgroundImageUrl($(el).attr('style'));
+        if (!poster) return;
+        const isGif = $(el).closest('.PlayableMedia--gif').length > 0;
+        pushMedia({
+          type: isGif ? 'gif' : 'video',
+          src: null,
+          poster: archiveImageUrl(poster, waybackTimestamp),
+          href: archivedPageUrl,
+        });
+      });
+
+    // Meta-tag fallback: text-only DOM but a player/video card in the head.
+    const ogImage = $('meta[property="og:image"]').attr('content')
+      || $('meta[name="twitter:image"]').attr('content') || '';
+    if (media.length === 0) {
+      const playerStream = $('meta[name="twitter:player:stream"]').attr('content')
+        || $('meta[property="og:video:url"]').attr('content')
+        || $('meta[property="og:video:secure_url"]').attr('content') || '';
+      const ogIsVideoThumb = /ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb/.test(ogImage);
+      if (playerStream || ogIsVideoThumb) {
+        pushMedia({
+          type: 'video',
+          src: playerStream ? archiveMediaUrl(playerStream, waybackTimestamp) : null,
+          poster: ogImage ? archiveImageUrl(ogImage, waybackTimestamp) : '',
+          href: archivedPageUrl,
+        });
+      } else if (/pbs\.twimg\.com\/media/.test(ogImage)) {
+        pushMedia({ type: 'photo', src: archiveImageUrl(ogImage, waybackTimestamp) });
+      }
+    }
+
+    // --- external link cards (summary / large-image cards rendered inline) ---
+    const cards = [];
+    scope
+      .find('.card2, .js-macaw-cards-iframe-container, [data-card2-name], [data-card-name]')
+      .each((i, el) => {
+        const $el = $(el);
+        const href = $el.attr('data-card-url') || $el.attr('data-card-href') || '';
+        const title = $el.find('.card2-text, .SummaryCard-title, [class*="title"]').first().text().trim();
+        const description = $el.find('.SummaryCard-description, [class*="description"]').first().text().trim();
+        const imgSrc = $el.find('img').first().attr('src')
+          || backgroundImageUrl($el.find('[style*="background-image"]').first().attr('style'));
+        if (!href && !title && !imgSrc) return;
+        cards.push({
+          type: 'card',
+          href,
+          title,
+          description,
+          image: imgSrc && /twimg\.com/.test(imgSrc) ? archiveImageUrl(imgSrc, waybackTimestamp) : imgSrc,
+        });
+      });
+    for (const card of cards) media.push(card);
+
     if (text && timestamp) {
       return {
         text,

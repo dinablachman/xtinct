@@ -17,6 +17,29 @@ function stripLeadingMentions(text) {
   return (text || '').replace(/^(?:@\w{1,15}\s+)+/, '').trim()
 }
 
+const URL_RE = /(https?:\/\/[^\s]+)/g
+
+// When a tweet has media, Twitter drops the trailing t.co self-link (it just
+// points back at the tweet's own media), so we do the same to avoid a dangling
+// link under the rendered video/photo.
+function stripTrailingTco(text) {
+  return (text || '').replace(/\s*https?:\/\/t\.co\/\w+\s*$/, '').trim()
+}
+
+// Split text on URLs and render the URLs as clickable links. Keeps the inline
+// link "active" without embedding anything itself.
+function renderTextWithLinks(text) {
+  const parts = (text || '').split(URL_RE)
+  return parts.map((part, i) => {
+    if (i % 2 === 1) {
+      return (
+        <a key={i} href={part} target="_blank" rel="noopener noreferrer">{part}</a>
+      )
+    }
+    return part
+  })
+}
+
 // Default avatar placeholder (used when the archive yields no profile image)
 function DefaultAvatar({ className }) {
   return (
@@ -33,6 +56,52 @@ function DefaultAvatar({ className }) {
 // existing rows instead of remounting them — which is what kills the jank.
 function tweetKey(t) {
   return `${t.timestamp}|${t.text}`
+}
+
+// Renders a single media item. The archive yields photos, videos, GIFs, and
+// external link cards; video whose stream Wayback never captured falls back to
+// its poster as a thumbnail linking to the archived tweet.
+function TweetMedia({ media }) {
+  // Tolerate the legacy shape (a bare image URL string) still in server cache.
+  const m = typeof media === 'string' ? { type: 'photo', src: media } : media
+
+  if (m.type === 'gif') {
+    return m.src ? (
+      <video className="xt-media-video" src={m.src} poster={m.poster || undefined}
+        autoPlay loop muted playsInline controls={false} />
+    ) : (
+      <a className="xt-media-link" href={m.href} target="_blank" rel="noopener noreferrer">
+        <img src={m.poster} alt="" loading="lazy" />
+        <span className="xt-media-badge">GIF</span>
+      </a>
+    )
+  }
+
+  if (m.type === 'video') {
+    return m.src ? (
+      <video className="xt-media-video" src={m.src} poster={m.poster || undefined} controls playsInline />
+    ) : (
+      <a className="xt-media-link" href={m.href} target="_blank" rel="noopener noreferrer">
+        <img src={m.poster} alt="" loading="lazy" />
+        <span className="xt-media-badge xt-media-badge--play">▶</span>
+      </a>
+    )
+  }
+
+  if (m.type === 'card') {
+    return (
+      <a className="xt-card" href={m.href || undefined} target="_blank" rel="noopener noreferrer">
+        {m.image && <img className="xt-card-img" src={m.image} alt="" loading="lazy" />}
+        <div className="xt-card-body">
+          {m.title && <div className="xt-card-title">{m.title}</div>}
+          {m.description && <div className="xt-card-desc">{m.description}</div>}
+          {m.href && <div className="xt-card-host">{(() => { try { return new URL(m.href).hostname.replace(/^www\./, '') } catch { return m.href } })()}</div>}
+        </div>
+      </a>
+    )
+  }
+
+  return <img src={m.src} alt="" loading="lazy" />
 }
 
 // Memoized row so already-rendered tweets don't re-render as new ones stream in.
@@ -60,12 +129,17 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
           </div>
         )}
         <div className="xt-tweet-text">
-          {tweet.isReply ? (stripLeadingMentions(tweet.text) || tweet.text) : tweet.text}
+          {(() => {
+            const hasMedia = tweet.media && tweet.media.length > 0
+            let body = tweet.isReply ? (stripLeadingMentions(tweet.text) || tweet.text) : tweet.text
+            if (hasMedia) body = stripTrailingTco(body) || body
+            return renderTextWithLinks(body)
+          })()}
         </div>
         {tweet.media && tweet.media.length > 0 && (
           <div className="xt-media">
             {tweet.media.map((m, idx) => (
-              <img key={idx} src={m} alt="" loading="lazy" />
+              <TweetMedia key={idx} media={m} />
             ))}
           </div>
         )}
