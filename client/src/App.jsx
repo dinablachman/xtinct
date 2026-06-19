@@ -106,7 +106,10 @@ function TweetMedia({ media }) {
 
 // Memoized row so already-rendered tweets don't re-render as new ones stream in.
 const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAvatarUrl }) {
-  const avatarUrl = tweet.avatarUrl || profileAvatarUrl
+  // Always use the one canonical account avatar (resolved once per profile load)
+  // rather than a per-tweet avatar — on reply permalinks the per-tweet scrape can
+  // pick up the replied-to user's pfp instead of the account's.
+  const avatarUrl = profileAvatarUrl
   return (
     <li className="xt-tweet">
       <div className="xt-tweet-avatar">
@@ -517,28 +520,28 @@ function App() {
                 <div className="xt-handle">@{loadedUsername}</div>
               </div>
 
-              {profile?.bio ? (
-                <p className="xt-bio">{profile.bio}</p>
-              ) : (
-                <p className="xt-bio xt-placeholder-text">no bio recovered from the archive yet</p>
+              {profile?.bio && <p className="xt-bio">{profile.bio}</p>}
+
+              {(profile?.location || profile?.website || profile?.joinDate) && (
+                <div className="xt-meta">
+                  {profile?.location && <span className="xt-meta-item">{profile.location}</span>}
+                  {profile?.website && (
+                    <span className="xt-meta-item">
+                      <a className="xt-website" href={/^https?:\/\//.test(profile.website) ? profile.website : `https://${profile.website}`} target="_blank" rel="noopener noreferrer">
+                        {profile.website.replace(/^https?:\/\//, '')}
+                      </a>
+                    </span>
+                  )}
+                  {profile?.joinDate && <span className="xt-meta-item">Joined {profile.joinDate}</span>}
+                </div>
               )}
 
-              <div className="xt-meta">
-                {profile?.location && <span className="xt-meta-item">{profile.location}</span>}
-                {profile?.website && (
-                  <span className="xt-meta-item">
-                    <a className="xt-website" href={/^https?:\/\//.test(profile.website) ? profile.website : `https://${profile.website}`} target="_blank" rel="noopener noreferrer">
-                      {profile.website.replace(/^https?:\/\//, '')}
-                    </a>
-                  </span>
-                )}
-                <span className="xt-meta-item">Joined {profile?.joinDate || '\u2014'}</span>
-              </div>
-
-              <div className="xt-stats">
-                <span><strong>{profile?.following || '\u2014'}</strong> Following</span>
-                <span><strong>{profile?.followers || '\u2014'}</strong> Followers</span>
-              </div>
+              {(profile?.following || profile?.followers) && (
+                <div className="xt-stats">
+                  {profile?.following && <span><strong>{profile.following}</strong> Following</span>}
+                  {profile?.followers && <span><strong>{profile.followers}</strong> Followers</span>}
+                </div>
+              )}
             </div>
 
             {/* Tabs */}

@@ -524,16 +524,15 @@ const PROFILE_SNAPSHOT_CAP = 8; // bound Wayback requests when filling fields
 const PROFILE_FIELDS = ['displayName', 'avatarUrl', 'bannerUrl', 'bio', 'location', 'joinDate', 'website', 'following', 'followers'];
 const profileCache = new Map(); // username -> { profile: object|null, expires: number }
 
-// Pull every captured snapshot of the profile page itself (NEWEST-FIRST). This
-// is a separate, exact-match CDX query from the tweet/status one.
-async function getProfileCaptures(username, retries = 2) {
-  // `matchType=exact` (only the profile URL, never sub-paths) keeps the query
-  // fast; `limit=-50` asks CDX for the NEWEST 50 captures. We deliberately
-  // avoid a `mimetype` filter — it forces a slow server-side scan that times
-  // out — and instead drop non-HTML rows client-side below. Note: many accounts
-  // only ever had their individual tweets archived, not the profile page, so an
-  // empty result here is normal and simply yields no header data.
-  const cdxUrl = `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}&matchType=exact&output=json&filter=statuscode:200&limit=-50`;
+// The parseable profile markup (ProfileHeaderCard / ProfileNav-stat) only
+// exists on the classic server-rendered era; from ~2020 on, twitter.com is a
+// React app that archives as an empty shell. So for an active account the
+// newest captures are useless and we must reach back to the classic era.
+const PROFILE_CLASSIC_CUTOFF = '20200101000000';
+
+// Run one CDX query and return its captures as {url, timestamp}, dropping
+// non-HTML rows client-side (a `mimetype` filter makes the query time out).
+async function fetchProfileCDX(cdxUrl, retries = 2) {
   for (let attempt = 0; attempt < retries; attempt++) {
     try {
       const { data } = await axios.get(cdxUrl, {
@@ -545,19 +544,38 @@ async function getProfileCaptures(username, retries = 2) {
       const urlIdx = headers.indexOf('original');
       const tsIdx = headers.indexOf('timestamp');
       const mimeIdx = headers.indexOf('mimetype');
-      const caps = data.slice(1)
+      return data.slice(1)
         .filter(r => mimeIdx < 0 || !r[mimeIdx] || /html/.test(r[mimeIdx]))
         .map(r => ({ url: r[urlIdx], timestamp: r[tsIdx] }))
         .filter(c => c.url && c.timestamp);
-      // Wayback timestamps are zero-padded, so lexical desc == newest-first.
-      caps.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
-      return caps;
     } catch (err) {
       console.log(`Profile CDX attempt ${attempt + 1} failed: ${err.message}`);
       if (attempt < retries - 1) await new Promise(r => setTimeout(r, 1500));
     }
   }
   return [];
+}
+
+// Pull profile-page captures and order them so the ones likely to actually
+// parse come first: newest classic-era snapshots, then newest modern ones.
+// Two cheap exact-match queries — one for the newest captures overall (covers
+// accounts whose latest snapshot is already classic) and one bounded to the
+// classic era (covers active accounts whose recent snapshots are React shells).
+async function getProfileCaptures(username) {
+  const base = `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}&matchType=exact&output=json&filter=statuscode:200`;
+  const [newest, classic] = await Promise.all([
+    fetchProfileCDX(`${base}&limit=-25`),
+    fetchProfileCDX(`${base}&to=${PROFILE_CLASSIC_CUTOFF}&limit=-25`),
+  ]);
+
+  const byTs = new Map();
+  for (const c of [...newest, ...classic]) byTs.set(c.timestamp, c);
+  const all = [...byTs.values()];
+
+  const desc = (a, b) => b.timestamp.localeCompare(a.timestamp);
+  const classicFirst = all.filter(c => c.timestamp < PROFILE_CLASSIC_CUTOFF).sort(desc);
+  const modern = all.filter(c => c.timestamp >= PROFILE_CLASSIC_CUTOFF).sort(desc);
+  return [...classicFirst, ...modern];
 }
 
 // Parse a single archived profile page into a fields object. Returns null for
@@ -742,26 +760,29 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
           if (tweet && tweet.text && tweet.timestamp) {
             // Emit name/avatar from the first tweet that has them, per-field.
             // The client treats this as a fill-only fallback, so the richer
-            // /api/profile data takes precedence when it arrives.
+            // /api/profile data takes precedence when it arrives. Crucially, the
+            // avatar is only adopted from a NON-reply tweet: on a reply permalink
+            // the first profile image on the page can be the replied-to user's,
+            // not the account's. This becomes the single avatar used for all rows.
             const patch = {};
             if (!sentFallbackName && tweet.displayName) {
               patch.displayName = tweet.displayName;
               sentFallbackName = true;
             }
-            if (!sentFallbackAvatar && tweet.avatarUrl) {
+            if (!sentFallbackAvatar && tweet.avatarUrl && !tweet.isReply) {
               patch.avatarUrl = tweet.avatarUrl;
               sentFallbackAvatar = true;
             }
             if (Object.keys(patch).length > 0) {
               sendEvent('profile', { handle: username, ...patch });
             }
-            // Send tweet as it's processed
+            // Send tweet as it's processed. The avatar is intentionally omitted:
+            // rows render the one canonical account avatar from the profile event.
             sendEvent('tweet', {
               text: tweet.text,
               timestamp: tweet.timestamp,
               isReply: tweet.isReply,
               replyingTo: tweet.replyingTo,
-              avatarUrl: tweet.avatarUrl,
               media: tweet.media,
             });
           }
