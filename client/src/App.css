@@ -289,6 +289,26 @@
   background: linear-gradient(135deg, #1da1f2 0%, #0d76b8 100%);
 }
 
+.xt-banner--img {
+  background: #000;
+}
+
+.xt-banner--img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.xt-website {
+  color: var(--tw-blue);
+  text-decoration: none;
+}
+
+.xt-website:hover {
+  text-decoration: underline;
+}
+
 /* Header card */
 .xt-header {
   position: relative;

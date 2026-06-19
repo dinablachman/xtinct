@@ -194,6 +194,9 @@ function App() {
   // update per tweet) so the timeline grows smoothly instead of thrashing.
   const tweetBufferRef = useRef([])
   const flushTimerRef = useRef(null)
+  // Tracks the username of the active search so a slow profile response for a
+  // previous search can be discarded instead of overwriting the current one.
+  const profileReqRef = useRef('')
 
   const cleanUsername = username.replace(/^@/, '')
   const displayName = profile?.displayName || loadedUsername || 'Unknown'
@@ -291,8 +294,16 @@ function App() {
             setProgress(data)
             break
           case 'profile':
-            // Keep the first profile we recover; later pages resend the same.
-            setProfile(prev => prev || data)
+            // Tweet-derived fallback: fill only fields not already set, so the
+            // authoritative /api/profile data (which may arrive before or after)
+            // always wins for fields it provides.
+            setProfile(prev => {
+              const next = { ...prev }
+              for (const [k, v] of Object.entries(data)) {
+                if (v && !next[k]) next[k] = v
+              }
+              return next
+            })
             break
           case 'tweet':
             // Buffer and flush in ~100ms chunks so the list grows smoothly
@@ -338,6 +349,27 @@ function App() {
     }
   }
 
+  // Fetch the full archived profile (bio, banner, stats, etc.) in parallel with
+  // the tweet stream so it never blocks tweets from showing. The archived data
+  // is authoritative, so it overwrites any tweet-derived fallback fields.
+  const loadProfile = (user) => {
+    if (!user) return
+    profileReqRef.current = user
+    fetch(`/api/profile/${user}`)
+      .then(r => (r.ok ? r.json() : null))
+      .then(data => {
+        if (!data || profileReqRef.current !== user) return
+        setProfile(prev => {
+          const next = { ...prev }
+          for (const [k, v] of Object.entries(data)) {
+            if (v) next[k] = v
+          }
+          return next
+        })
+      })
+      .catch(() => {})
+  }
+
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
@@ -353,6 +385,7 @@ function App() {
     if (!cleanUsername.trim()) return
     setLoadedUsername(cleanUsername)
     loadPage(cleanUsername, 0, false)
+    loadProfile(cleanUsername)
   }
 
   // The observer's only responsibility: report whether the bottom-of-list
@@ -386,6 +419,7 @@ function App() {
     setHasSearched(false)
     setUsername('')
     setLoadedUsername('')
+    profileReqRef.current = ''
     clearTweetBuffer()
     setTweets([])
     setProfile(null)
@@ -453,8 +487,14 @@ function App() {
           <div className="xt-profile">
             {error && <div className="tw-error" style={{ padding: '12px 18px', margin: 0 }}>{error}</div>}
 
-            {/* Banner (placeholder) */}
-            <div className="xt-banner" aria-hidden="true" />
+            {/* Banner — archived header image when recovered, else the gradient */}
+            {profile?.bannerUrl ? (
+              <div className="xt-banner xt-banner--img">
+                <img src={profile.bannerUrl} alt="" />
+              </div>
+            ) : (
+              <div className="xt-banner" aria-hidden="true" />
+            )}
 
             {/* Profile header card */}
             <div className="xt-header">
@@ -477,16 +517,27 @@ function App() {
                 <div className="xt-handle">@{loadedUsername}</div>
               </div>
 
-              <p className="xt-bio xt-placeholder-text">no bio recovered from the archive yet</p>
+              {profile?.bio ? (
+                <p className="xt-bio">{profile.bio}</p>
+              ) : (
+                <p className="xt-bio xt-placeholder-text">no bio recovered from the archive yet</p>
+              )}
 
               <div className="xt-meta">
-                <span className="xt-meta-item">Location unknown</span>
-                <span className="xt-meta-item">Joined &mdash;</span>
+                {profile?.location && <span className="xt-meta-item">{profile.location}</span>}
+                {profile?.website && (
+                  <span className="xt-meta-item">
+                    <a className="xt-website" href={/^https?:\/\//.test(profile.website) ? profile.website : `https://${profile.website}`} target="_blank" rel="noopener noreferrer">
+                      {profile.website.replace(/^https?:\/\//, '')}
+                    </a>
+                  </span>
+                )}
+                <span className="xt-meta-item">Joined {profile?.joinDate || '\u2014'}</span>
               </div>
 
               <div className="xt-stats">
-                <span><strong>&mdash;</strong> Following</span>
-                <span><strong>&mdash;</strong> Followers</span>
+                <span><strong>{profile?.following || '\u2014'}</strong> Following</span>
+                <span><strong>{profile?.followers || '\u2014'}</strong> Followers</span>
               </div>
             </div>
 

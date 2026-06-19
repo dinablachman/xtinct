@@ -19,7 +19,7 @@ function pageRange(page) {
   for (let i = 0; i < page; i++) start += sizeForPage(i);
   return { start, end: start + sizeForPage(page) };
 }
-
+ 
 // Cache of deduped, newest-first captures per username so paging through a
 // timeline doesn't re-hit the CDX API on every page. The slow part (snapshot
 // fetches) still runs per page; this just avoids re-discovering the tweet list.
@@ -362,6 +362,14 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       const ogImg = $('meta[property="og:image"]').attr('content') || '';
       if (ogImg.includes('profile_images')) avatarOriginal = ogImg;
     }
+    if (!avatarOriginal) {
+      // Newer/React-era archived pages have no classic avatar markup and put
+      // the profile image in a CSS background-image. As a last resort, grab the
+      // first profile_images URL anywhere in the page (the author's avatar
+      // appears at the top), trimming any trailing quote/paren artifacts.
+      const m = data.match(/https?:\/\/pbs\.twimg\.com\/profile_images\/[^\s"'&)\\]+/);
+      if (m) avatarOriginal = m[0];
+    }
     const avatarUrl = avatarOriginal
       ? archiveImageUrl(upgradeAvatarSize(avatarOriginal), waybackTimestamp)
       : '';
@@ -507,6 +515,166 @@ async function getTweet(snapshotUrl, waybackTimestamp) {
   return tweet;
 }
 
+// --- archived profile (header) support ---
+// Profile pages have NO og/twitter meta (unlike tweet pages), so everything
+// below is DOM-based against the classic server-rendered `Profile*` markup.
+// Post-~2019 captures are empty React shells; those parse to null and are skipped.
+const PROFILE_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const PROFILE_SNAPSHOT_CAP = 8; // bound Wayback requests when filling fields
+const PROFILE_FIELDS = ['displayName', 'avatarUrl', 'bannerUrl', 'bio', 'location', 'joinDate', 'website', 'following', 'followers'];
+const profileCache = new Map(); // username -> { profile: object|null, expires: number }
+
+// Pull every captured snapshot of the profile page itself (NEWEST-FIRST). This
+// is a separate, exact-match CDX query from the tweet/status one.
+async function getProfileCaptures(username, retries = 2) {
+  // `matchType=exact` (only the profile URL, never sub-paths) keeps the query
+  // fast; `limit=-50` asks CDX for the NEWEST 50 captures. We deliberately
+  // avoid a `mimetype` filter — it forces a slow server-side scan that times
+  // out — and instead drop non-HTML rows client-side below. Note: many accounts
+  // only ever had their individual tweets archived, not the profile page, so an
+  // empty result here is normal and simply yields no header data.
+  const cdxUrl = `https://web.archive.org/cdx/search/cdx?url=twitter.com/${username}&matchType=exact&output=json&filter=statuscode:200&limit=-50`;
+  for (let attempt = 0; attempt < retries; attempt++) {
+    try {
+      const { data } = await axios.get(cdxUrl, {
+        timeout: 15000,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; WaybackBot/1.0)' },
+      });
+      if (!Array.isArray(data) || data.length <= 1) return [];
+      const headers = data[0];
+      const urlIdx = headers.indexOf('original');
+      const tsIdx = headers.indexOf('timestamp');
+      const mimeIdx = headers.indexOf('mimetype');
+      const caps = data.slice(1)
+        .filter(r => mimeIdx < 0 || !r[mimeIdx] || /html/.test(r[mimeIdx]))
+        .map(r => ({ url: r[urlIdx], timestamp: r[tsIdx] }))
+        .filter(c => c.url && c.timestamp);
+      // Wayback timestamps are zero-padded, so lexical desc == newest-first.
+      caps.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+      return caps;
+    } catch (err) {
+      console.log(`Profile CDX attempt ${attempt + 1} failed: ${err.message}`);
+      if (attempt < retries - 1) await new Promise(r => setTimeout(r, 1500));
+    }
+  }
+  return [];
+}
+
+// Parse a single archived profile page into a fields object. Returns null for
+// empty React-era shells (no classic markup) so callers can skip them.
+function extractProfileFromSnapshot(html, waybackTimestamp) {
+  const $ = cheerio.load(html);
+  const avatarEl = $('.ProfileAvatar-image').first();
+  // Empty-shell guard: none of the classic profile markup is present.
+  if ($('.ProfileHeaderCard').length === 0 && avatarEl.length === 0 && $('.ProfileNav').length === 0) {
+    return null;
+  }
+
+  const profile = {};
+
+  const displayName = $('.ProfileHeaderCard-name a, .ProfileHeaderCard-nameLink').first().text().trim();
+  if (displayName) profile.displayName = displayName;
+
+  const avatarSrc = avatarEl.attr('src') || $('.ProfileAvatar img').first().attr('src') || '';
+  if (avatarSrc && /profile_images/.test(avatarSrc)) {
+    profile.avatarUrl = archiveImageUrl(upgradeAvatarSize(avatarSrc), waybackTimestamp);
+  }
+
+  const bannerEl = $('.ProfileCanopy-headerBg').first();
+  let bannerSrc = bannerEl.find('img').first().attr('src')
+    || backgroundImageUrl(bannerEl.attr('style'))
+    || backgroundImageUrl(bannerEl.find('[style*="background-image"]').first().attr('style'));
+  if (bannerSrc && /profile_banners/.test(bannerSrc)) {
+    profile.bannerUrl = archiveImageUrl(bannerSrc, waybackTimestamp);
+  }
+
+  const bio = $('.ProfileHeaderCard-bio').first().text().trim();
+  if (bio) profile.bio = bio;
+
+  const location = $('.ProfileHeaderCard-locationText').first().text().trim();
+  if (location) profile.location = location;
+
+  const joinDateEl = $('.ProfileHeaderCard-joinDateText').first();
+  // Prefer the human text ("Joined March 2006") over the title (an exact
+  // timestamp); strip a leading "Joined" so the UI can prefix it consistently.
+  const joinDate = (joinDateEl.text() || joinDateEl.attr('title') || '')
+    .replace(/^\s*Joined\s*/i, '').trim();
+  if (joinDate) profile.joinDate = joinDate;
+
+  const urlEl = $('.ProfileHeaderCard-urlText a').first();
+  const website = (urlEl.attr('data-original-url') || urlEl.attr('title') || urlEl.text() || '').trim();
+  if (website) profile.website = website;
+
+  // Stats live in the nav as title attrs like "2,355 Following" / "3,942,456 Followers".
+  $('.ProfileNav-stat').each((i, el) => {
+    const title = ($(el).attr('title') || '').trim();
+    if (/Following$/i.test(title) && !profile.following) {
+      profile.following = title.replace(/\s*Following$/i, '').trim();
+    } else if (/Followers$/i.test(title) && !profile.followers) {
+      profile.followers = title.replace(/\s*Followers$/i, '').trim();
+    }
+  });
+
+  return Object.keys(profile).length ? profile : null;
+}
+
+// Build the consolidated profile for a username: walk profile-page snapshots
+// newest-first and merge field-independently (newest non-empty value of each
+// field wins), capping the number of fetches. Cached per username.
+async function getProfile(username) {
+  const cached = profileCache.get(username);
+  if (cached && cached.expires > Date.now()) return cached.profile;
+
+  const captures = await getProfileCaptures(username);
+
+  const merged = {};
+  let fetched = 0;
+  for (const cap of captures) {
+    if (fetched >= PROFILE_SNAPSHOT_CAP) break;
+    if (PROFILE_FIELDS.every(f => merged[f])) break; // all fields filled
+    const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
+    fetched++;
+    let parsed = null;
+    try {
+      parsed = await limit.run(async () => {
+        await new Promise(r => setTimeout(r, 50 + Math.random() * 150));
+        const { data } = await axios.get(snapshotUrl, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          timeout: 7000,
+        });
+        return extractProfileFromSnapshot(data, cap.timestamp);
+      });
+    } catch (err) {
+      if (isBlockError(err)) break; // stop hammering a throttling wall
+      continue;
+    }
+    if (!parsed) continue;
+    // Newest-first iteration => only fill fields we haven't seen yet.
+    for (const f of PROFILE_FIELDS) {
+      if (!merged[f] && parsed[f]) merged[f] = parsed[f];
+    }
+  }
+
+  const profile = Object.keys(merged).length ? merged : null;
+  console.log(`Profile for @${username}: ${profile ? `recovered [${Object.keys(profile).join(', ')}] from ${fetched} snapshot(s)` : `none (checked ${fetched} snapshot(s))`}`);
+  profileCache.set(username, { profile, expires: Date.now() + PROFILE_CACHE_TTL_MS });
+  return profile;
+}
+
+// Dedicated profile endpoint. The client fetches this in parallel with the
+// tweet stream so the (sometimes slow) profile-page CDX never delays tweets.
+// Profile data is optional, so failures resolve to just the handle, not an error.
+app.get('/api/profile/:username', async (req, res) => {
+  const username = req.params.username.replace(/^@/, '');
+  try {
+    const profile = await getProfile(username);
+    res.json({ handle: username, ...(profile || {}) });
+  } catch (err) {
+    console.error(`Error fetching profile for @${username}:`, err.message);
+    res.json({ handle: username });
+  }
+});
+
 // Streaming endpoint for progressive loading (paginated for infinite scroll)
 app.get('/api/tweets/stream/:username', async (req, res) => {
   const username = req.params.username.replace(/^@/, '');
@@ -550,9 +718,13 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
     sendEvent('meta', { total, page, hasMore, count: pageCaptures.length });
     sendEvent('progress', { total: pageCaptures.length, loaded: 0 });
 
-    // Send identity (display name + avatar) once, as soon as we can recover it
-    let profileSent = false;
-    
+    // Tweet-derived identity fallback, sent per-field as soon as the first
+    // tweet with a name/avatar arrives. The full archived profile (bio, banner,
+    // stats, etc.) is fetched separately via GET /api/profile so it never gates
+    // this stream; the client merges the two and lets the archived data win.
+    let sentFallbackName = false;
+    let sentFallbackAvatar = false;
+
     // Process this page's captures with concurrency control and streaming
     const tweetPromises = pageCaptures.map((cap, index) => {
       const snapshotUrl = `https://web.archive.org/web/${cap.timestamp}id_/${cap.url}`;
@@ -568,13 +740,20 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
           // resets scattered across an otherwise-healthy page.
           connectionFailures = 0;
           if (tweet && tweet.text && tweet.timestamp) {
-            if (!profileSent && (tweet.displayName || tweet.avatarUrl)) {
-              profileSent = true;
-              sendEvent('profile', {
-                handle: username,
-                displayName: tweet.displayName,
-                avatarUrl: tweet.avatarUrl,
-              });
+            // Emit name/avatar from the first tweet that has them, per-field.
+            // The client treats this as a fill-only fallback, so the richer
+            // /api/profile data takes precedence when it arrives.
+            const patch = {};
+            if (!sentFallbackName && tweet.displayName) {
+              patch.displayName = tweet.displayName;
+              sentFallbackName = true;
+            }
+            if (!sentFallbackAvatar && tweet.avatarUrl) {
+              patch.avatarUrl = tweet.avatarUrl;
+              sentFallbackAvatar = true;
+            }
+            if (Object.keys(patch).length > 0) {
+              sendEvent('profile', { handle: username, ...patch });
             }
             // Send tweet as it's processed
             sendEvent('tweet', {
