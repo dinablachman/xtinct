@@ -534,6 +534,55 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       }
     }
 
+    // Modern (React/SSR) layout has no .QuoteTweet. There, a quote tweet renders
+    // the quoted tweet NESTED inside the main tweet's <article>, so that article
+    // holds two [data-testid="tweetText"] blocks (main + quoted) plus a link to
+    // the quoted status. Replies (and replies shown below) instead put each tweet
+    // in its own <article> with a single tweetText, so requiring 2+ tweetText in
+    // one article avoids misclassifying them as quotes.
+    if (!quote) {
+      const currentId = (snapshotUrl.match(/\/status\/(\d+)/) || [])[1] || '';
+      $('article').each((i, art) => {
+        if (quote) return;
+        const $art = $(art);
+        if ($art.find('[data-testid="tweetText"]').length < 2) return;
+        // The nested quoted tweet's status link (a different tweet id).
+        let qHandle = '', qId = '', flEl = null;
+        $art.find('a[href*="/status/"]').each((j, a) => {
+          if (qId) return;
+          const m = ($(a).attr('href') || '').match(/^\/([^/]+)\/status\/(\d+)/);
+          if (m && m[2] !== currentId) { qHandle = m[1]; qId = m[2]; flEl = $(a); }
+        });
+        if (!qId || !flEl) return;
+        // The quote box: nearest ancestor of that link that also holds a
+        // tweetText, so text/name/media are scoped to the quote (not the parent).
+        let box = flEl;
+        for (let k = 0; k < 12; k++) {
+          box = box.parent();
+          if (!box || !box.get(0)) { box = null; break; }
+          if (box.find('[data-testid="tweetText"]').length) break;
+        }
+        if (!box || !box.get(0)) return;
+        const qText = decodeEntities(box.find('[data-testid="tweetText"]').first().text().trim());
+        const qName = box.find(`a[href="/${qHandle}"]`).first().text().trim();
+        let qImg = '';
+        box.find('img').each((j, el) => {
+          const src = $(el).attr('src') || '';
+          if (!qImg && /pbs\.twimg\.com\/media/.test(src)) qImg = src;
+        });
+        if (qText || qName) {
+          quote = {
+            available: true,
+            name: qName,
+            handle: '@' + qHandle,
+            text: qText,
+            image: qImg ? archiveImageUrl(qImg, waybackTimestamp) : '',
+            url: `https://twitter.com/${qHandle}/status/${qId}`,
+          };
+        }
+      });
+    }
+
     if (text && timestamp) {
       // Classic tweet pages embed the author's ProfileHeaderCard sidebar (bio,
       // location, website, join date, stats, banner). Harvest it so accounts
