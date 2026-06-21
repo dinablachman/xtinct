@@ -736,6 +736,60 @@
   margin-top: 4px;
 }
 
+/* Quote tweet card */
+.xt-quote {
+  display: block;
+  margin-top: 8px;
+  max-width: 520px;
+  padding: 10px 12px;
+  border: 1px solid var(--tw-border);
+  border-radius: 16px;
+  text-decoration: none;
+  color: inherit;
+  transition: background 0.12s ease;
+}
+
+a.xt-quote:hover {
+  background: #f7f9fa;
+}
+
+.xt-quote-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  font-size: 14px;
+}
+
+.xt-quote-name {
+  font-weight: 700;
+  color: var(--tw-text);
+}
+
+.xt-quote-handle {
+  color: var(--tw-text-muted);
+}
+
+.xt-quote-text {
+  margin-top: 2px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--tw-text);
+}
+
+.xt-quote-img {
+  width: 100%;
+  margin-top: 8px;
+  border-radius: 12px;
+  border: 1px solid var(--tw-border);
+  display: block;
+}
+
+.xt-quote-unavailable {
+  font-size: 14px;
+  color: var(--tw-text-muted);
+}
+
 .xt-tweet-text a {
   color: var(--tw-blue);
   text-decoration: none;

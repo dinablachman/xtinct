@@ -168,14 +168,51 @@ function TweetMedia({ media }) {
   return <img src={m.src} alt="" loading="lazy" />
 }
 
+// Nested card for a quote tweet. When the quoted tweet was recoverable from the
+// archive we render its author/text/image (linking to the original); when it was
+// already unavailable at archive time we still show a box so the quote is visible.
+function QuoteCard({ quote }) {
+  if (!quote) return null
+  const inner = quote.available ? (
+    <>
+      <div className="xt-quote-head">
+        <span className="xt-quote-name">{quote.name}</span>
+        {quote.handle && <span className="xt-quote-handle">{quote.handle}</span>}
+      </div>
+      {/* Plain text (not linkified) so the card itself can be a single anchor. */}
+      {quote.text && <div className="xt-quote-text">{quote.text}</div>}
+      {quote.image && <img className="xt-quote-img" src={quote.image} alt="" loading="lazy" />}
+    </>
+  ) : (
+    <div className="xt-quote-unavailable">This post is unavailable.</div>
+  )
+  return quote.url ? (
+    <a className="xt-quote" href={quote.url} target="_blank" rel="noopener noreferrer">{inner}</a>
+  ) : (
+    <div className="xt-quote">{inner}</div>
+  )
+}
+
 // Memoized row so already-rendered tweets don't re-render as new ones stream in.
 const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAvatarUrl }) {
   // Always use the one canonical account avatar (resolved once per profile load)
   // rather than a per-tweet avatar — on reply permalinks the per-tweet scrape can
   // pick up the replied-to user's pfp instead of the account's.
   const avatarUrl = profileAvatarUrl
+  // Click anywhere on the post body opens its archived Wayback page (debug aid).
+  // Ignore clicks on inner interactive elements and on text the user is selecting.
+  const handleRowClick = (e) => {
+    if (!tweet.archiveUrl) return
+    if (e.target.closest('a, video, button')) return
+    if (window.getSelection && window.getSelection().toString()) return
+    window.open(tweet.archiveUrl, '_blank', 'noopener,noreferrer')
+  }
   return (
-    <li className="xt-tweet">
+    <li
+      className="xt-tweet"
+      onClick={handleRowClick}
+      style={tweet.archiveUrl ? { cursor: 'pointer' } : undefined}
+    >
       <div className="xt-tweet-avatar">
         <Avatar src={avatarUrl} alt="" placeholderClassName="xt-avatar-placeholder" />
       </div>
@@ -195,7 +232,7 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
           {(() => {
             const hasMedia = tweet.media && tweet.media.length > 0
             let body = tweet.isReply ? (stripLeadingMentions(tweet.text) || tweet.text) : tweet.text
-            if (hasMedia) body = stripTrailingTco(body) || body
+            if (hasMedia || tweet.quote) body = stripTrailingTco(body) || body
             return renderTextWithLinks(body)
           })()}
         </div>
@@ -206,6 +243,7 @@ const TweetRow = memo(function TweetRow({ tweet, displayName, handle, profileAva
             ))}
           </div>
         )}
+        {tweet.quote && <QuoteCard quote={tweet.quote} />}
       </div>
     </li>
   )

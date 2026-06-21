@@ -502,6 +502,38 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
       });
     for (const card of cards) media.push(card);
 
+    // --- quote tweet (classic permalinks embed the quoted tweet inline) ---
+    // Recoverable even when the original is now deleted, since it was a
+    // point-in-time copy captured when the quoting tweet was archived.
+    let quote = null;
+    const qEl = scope.find('.QuoteTweet, .QuoteTweet-innerContainer').first();
+    if (qEl.length) {
+      const href = scope.find('a.QuoteTweet-link').attr('href') || '';
+      const url = href ? `https://twitter.com${href}` : '';
+      const qName = qEl.find('.QuoteTweet-fullname').first().text().trim();
+      const qHandle = qEl.find('.QuoteTweet-screenname, .username').first().text().trim();
+      const qText = decodeEntities(qEl.find('.QuoteTweet-text').first().text().trim())
+        .replace(/\s*(?:https?:\/\/t\.co\/\w+|pic\.twitter\.com\/\w+)\s*$/i, '')
+        .trim();
+      let qImg = '';
+      qEl.find('img').each((i, el) => {
+        const src = $(el).attr('src') || '';
+        if (!qImg && /pbs\.twimg\.com\/media/.test(src)) qImg = src;
+      });
+      if (qName || qText) {
+        quote = {
+          available: true,
+          name: qName,
+          handle: qHandle,
+          text: qText,
+          image: qImg ? archiveImageUrl(qImg, waybackTimestamp) : '',
+          url,
+        };
+      } else {
+        quote = { available: false, url };
+      }
+    }
+
     if (text && timestamp) {
       // Classic tweet pages embed the author's ProfileHeaderCard sidebar (bio,
       // location, website, join date, stats, banner). Harvest it so accounts
@@ -516,6 +548,7 @@ async function extractTweetFromSnapshot(snapshotUrl, waybackTimestamp) {
         avatarUrl,
         media,
         profile,
+        quote,
       };
     }
   } catch (err) {
@@ -831,6 +864,9 @@ app.get('/api/tweets/stream/:username', async (req, res) => {
               isReply: tweet.isReply,
               replyingTo: tweet.replyingTo,
               media: tweet.media,
+              quote: tweet.quote,
+              // Viewable (non-id_) Wayback page, for click-through/debugging.
+              archiveUrl: `https://web.archive.org/web/${cap.timestamp}/${cap.url}`,
             });
           }
           // Send progress update
